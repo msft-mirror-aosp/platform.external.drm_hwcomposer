@@ -36,7 +36,13 @@ class HisiImporter : public DrmGenericImporter {
 
   int ImportBuffer(buffer_handle_t handle, hwc_drm_bo_t *bo) override;
 
+  bool CanImportBuffer(buffer_handle_t handle) override;
+
  private:
+  uint64_t ConvertGrallocFormatToDrmModifiers(uint64_t flags, bool is_rgb);
+
+  bool IsDrmFormatRgb(uint32_t drm_format);
+
   DrmDevice *drm_;
 
   const gralloc_module_t *gralloc_;

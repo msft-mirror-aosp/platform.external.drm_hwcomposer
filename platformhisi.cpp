@@ -70,7 +70,59 @@ int HisiImporter::Init() {
   return 0;
 }
 
+#ifdef MALI_GRALLOC_INTFMT_AFBC_BASIC
+uint64_t HisiImporter::ConvertGrallocFormatToDrmModifiers(uint64_t flags,
+                                                          bool is_rgb) {
+  uint64_t features = 0UL;
+
+  if (flags & MALI_GRALLOC_INTFMT_AFBC_BASIC)
+    features |= AFBC_FORMAT_MOD_BLOCK_SIZE_16x16;
+
+  if (flags & MALI_GRALLOC_INTFMT_AFBC_SPLITBLK)
+    features |= (AFBC_FORMAT_MOD_SPLIT | AFBC_FORMAT_MOD_SPARSE);
+
+  if (flags & MALI_GRALLOC_INTFMT_AFBC_WIDEBLK)
+    features |= AFBC_FORMAT_MOD_BLOCK_SIZE_32x8;
+
+  if (flags & MALI_GRALLOC_INTFMT_AFBC_TILED_HEADERS)
+    features |= AFBC_FORMAT_MOD_TILED;
+
+  if (features) {
+    if (is_rgb)
+      features |= AFBC_FORMAT_MOD_YTR;
+
+    return DRM_FORMAT_MOD_ARM_AFBC(features);
+  }
+
+  return 0;
+}
+#else
+uint64_t HisiImporter::ConvertGrallocFormatToDrmModifiers(uint64_t /* flags */,
+                                                          bool /* is_rgb */) {
+  return 0;
+}
+#endif
+
+bool HisiImporter::IsDrmFormatRgb(uint32_t drm_format) {
+  switch (drm_format) {
+    case DRM_FORMAT_ARGB8888:
+    case DRM_FORMAT_XBGR8888:
+    case DRM_FORMAT_ABGR8888:
+    case DRM_FORMAT_BGR888:
+    case DRM_FORMAT_BGR565:
+      return true;
+    case DRM_FORMAT_YVU420:
+      return false;
+    default:
+      ALOGE("Unsupported format %u assuming rgb?", drm_format);
+      return true;
+  }
+}
+
 int HisiImporter::ImportBuffer(buffer_handle_t handle, hwc_drm_bo_t *bo) {
+  bool is_rgb;
+  uint64_t modifiers[4] = {0};
+
   memset(bo, 0, sizeof(hwc_drm_bo_t));
 
   private_handle_t const *hnd = reinterpret_cast<private_handle_t const *>(
@@ -78,10 +130,10 @@ int HisiImporter::ImportBuffer(buffer_handle_t handle, hwc_drm_bo_t *bo) {
   if (!hnd)
     return -EINVAL;
 
-  // We can't import these types of buffers, so pretend we did and rely on the
-  // planner to skip them when choosing layers for planes
+  // We can't import these types of buffers.
+  // These buffers should have been filtered out with CanImportBuffer()
   if (!(hnd->usage & GRALLOC_USAGE_HW_FB))
-    return 0;
+    return -EINVAL;
 
   uint32_t gem_handle;
   int ret = drmPrimeFDToHandle(drm_->fd(), hnd->share_fd, &gem_handle);
@@ -93,6 +145,10 @@ int HisiImporter::ImportBuffer(buffer_handle_t handle, hwc_drm_bo_t *bo) {
   int32_t fmt = ConvertHalFormatToDrm(hnd->req_format);
   if (fmt < 0)
     return fmt;
+
+  is_rgb = IsDrmFormatRgb(fmt);
+  modifiers[0] = ConvertGrallocFormatToDrmModifiers(hnd->internal_format,
+                                                    is_rgb);
 
   bo->width = hnd->width;
   bo->height = hnd->height;
@@ -129,8 +185,11 @@ int HisiImporter::ImportBuffer(buffer_handle_t handle, hwc_drm_bo_t *bo) {
       break;
   }
 
-  ret = drmModeAddFB2(drm_->fd(), bo->width, bo->height, bo->format,
-                      bo->gem_handles, bo->pitches, bo->offsets, &bo->fb_id, 0);
+  ret = drmModeAddFB2WithModifiers(drm_->fd(), bo->width, bo->height,
+                                   bo->format, bo->gem_handles, bo->pitches,
+                                   bo->offsets, modifiers, &bo->fb_id,
+                                   modifiers[0] ? DRM_MODE_FB_MODIFIERS : 0);
+
   if (ret) {
     ALOGE("could not create drm fb %d", ret);
     return ret;
@@ -139,36 +198,39 @@ int HisiImporter::ImportBuffer(buffer_handle_t handle, hwc_drm_bo_t *bo) {
   return ret;
 }
 
+bool HisiImporter::CanImportBuffer(buffer_handle_t handle) {
+  private_handle_t const *hnd = reinterpret_cast<private_handle_t const *>(
+      handle);
+  return hnd && (hnd->usage & GRALLOC_USAGE_HW_FB);
+}
+
 class PlanStageHiSi : public Planner::PlanStage {
  public:
   int ProvisionPlanes(std::vector<DrmCompositionPlane> *composition,
                       std::map<size_t, DrmHwcLayer *> &layers, DrmCrtc *crtc,
                       std::vector<DrmPlane *> *planes) {
     int layers_added = 0;
-    int initial_layers = layers.size();
-    // Fill up as many planes as we can with buffers that do not have HW_FB
-    // usage
+    // Fill up as many DRM planes as we can with buffers that have HW_FB usage.
+    // Buffers without HW_FB should have been filtered out with
+    // CanImportBuffer(), if we meet one here, just skip it.
     for (auto i = layers.begin(); i != layers.end(); i = layers.erase(i)) {
       if (!(i->second->gralloc_buffer_usage & GRALLOC_USAGE_HW_FB))
         continue;
 
       int ret = Emplace(composition, planes, DrmCompositionPlane::Type::kLayer,
-                        crtc, i->first);
+                        crtc, std::make_pair(i->first, i->second));
       layers_added++;
       // We don't have any planes left
       if (ret == -ENOENT)
         break;
-      else if (ret)
+      else if (ret) {
         ALOGE("Failed to emplace layer %zu, dropping it", i->first);
+        return ret;
+      }
     }
-    /*
-     * If we only have one layer, but we didn't emplace anything, we
-     * can run into trouble, as we might try to device composite a
-     * buffer we fake-imported, which can cause things to jamb up.
-     * So return an error in this case to ensure we force client
-     * compositing.
-     */
-    if (!layers_added && (initial_layers <= 1))
+    // If we didn't emplace anything, return an error to ensure we force client
+    // compositing.
+    if (!layers_added)
       return -EINVAL;
 
     return 0;

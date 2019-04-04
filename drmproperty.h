@@ -40,11 +40,17 @@ class DrmProperty {
   DrmProperty &operator=(const DrmProperty &) = delete;
 
   void Init(drmModePropertyPtr p, uint64_t value);
+  std::tuple<uint64_t, int> GetEnumValueWithName(std::string name) const;
 
   uint32_t id() const;
   std::string name() const;
 
-  int value(uint64_t *value) const;
+  std::tuple<int, uint64_t> value() const;
+  bool is_immutable() const;
+
+  bool is_range() const;
+  std::tuple<int, uint64_t> range_min() const;
+  std::tuple<int, uint64_t> range_max() const;
 
  private:
   class DrmPropertyEnum {
