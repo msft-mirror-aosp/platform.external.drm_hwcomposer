@@ -14,35 +14,29 @@
  * limitations under the License.
  */
 
-#ifndef ANDROID_PLATFORM_DRM_GENERIC_H_
-#define ANDROID_PLATFORM_DRM_GENERIC_H_
-
-#include "drmdevice.h"
-#include "platform.h"
-
-#include <hardware/gralloc.h>
+#include <pthread.h>
 
 namespace android {
 
-class DrmGenericImporter : public Importer {
+class AutoLock {
  public:
-  DrmGenericImporter(DrmDevice *drm);
-  ~DrmGenericImporter() override;
+  AutoLock(pthread_mutex_t *mutex, const char *const name)
+      : mutex_(mutex), name_(name) {
+  }
+  ~AutoLock() {
+    if (locked_)
+      Unlock();
+  }
 
-  int Init();
+  AutoLock(const AutoLock &rhs) = delete;
+  AutoLock &operator=(const AutoLock &rhs) = delete;
 
-  int ImportBuffer(buffer_handle_t handle, hwc_drm_bo_t *bo) override;
-  int ReleaseBuffer(hwc_drm_bo_t *bo) override;
-  bool CanImportBuffer(buffer_handle_t handle) override;
-
-  uint32_t ConvertHalFormatToDrm(uint32_t hal_format);
-  uint32_t DrmFormatToBitsPerPixel(uint32_t drm_format);
+  int Lock();
+  int Unlock();
 
  private:
-  DrmDevice *drm_;
-
-  const gralloc_module_t *gralloc_;
+  pthread_mutex_t *const mutex_;
+  bool locked_ = false;
+  const char *const name_;
 };
 }  // namespace android
-
-#endif
