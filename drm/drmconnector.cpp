@@ -89,7 +89,8 @@ void DrmConnector::set_display(int display) {
 
 bool DrmConnector::internal() const {
   return type_ == DRM_MODE_CONNECTOR_LVDS || type_ == DRM_MODE_CONNECTOR_eDP ||
-         type_ == DRM_MODE_CONNECTOR_DSI || type_ == DRM_MODE_CONNECTOR_VIRTUAL;
+         type_ == DRM_MODE_CONNECTOR_DSI ||
+         type_ == DRM_MODE_CONNECTOR_VIRTUAL || type_ == DRM_MODE_CONNECTOR_DPI;
 }
 
 bool DrmConnector::external() const {
@@ -138,13 +139,15 @@ int DrmConnector::UpdateModes() {
       m.set_id(drm_->next_mode_id());
       new_modes.push_back(m);
     }
-    if (new_modes.back().type() & DRM_MODE_TYPE_PREFERRED) {
+    // Use only the first DRM_MODE_TYPE_PREFERRED mode found
+    if (!preferred_mode_found &&
+        (new_modes.back().type() & DRM_MODE_TYPE_PREFERRED)) {
       preferred_mode_id_ = new_modes.back().id();
       preferred_mode_found = true;
     }
   }
   modes_.swap(new_modes);
-  if ((!preferred_mode_found) && (modes_.size() != 0)) {
+  if (!preferred_mode_found && modes_.size() != 0) {
     preferred_mode_id_ = modes_[0].id();
   }
   return 0;
