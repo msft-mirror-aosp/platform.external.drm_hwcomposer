@@ -22,6 +22,8 @@
 
 #include <hardware/hwcomposer2.h>
 
+#include <math.h>
+#include <array>
 #include <map>
 
 namespace android {
@@ -86,7 +88,24 @@ class DrmHwcTwo : public hwc2_device_t {
       return OutputFd(&release_fence_raw_);
     }
 
+    hwc_rect_t display_frame() {
+      return display_frame_;
+    }
+
     void PopulateDrmLayer(DrmHwcLayer *layer);
+
+    bool RequireScalingOrPhasing() {
+      float src_width = source_crop_.right - source_crop_.left;
+      float src_height = source_crop_.bottom - source_crop_.top;
+
+      float dest_width = display_frame_.right - display_frame_.left;
+      float dest_height = display_frame_.bottom - display_frame_.top;
+
+      bool scaling = src_width != dest_width || src_height != dest_height;
+      bool phasing = (source_crop_.left - floor(source_crop_.left) != 0) ||
+                     (source_crop_.top - floor(source_crop_.top) != 0);
+      return scaling || phasing;
+    }
 
     // Layer hooks
     HWC2::Error SetCursorPosition(int32_t x, int32_t y);
@@ -120,6 +139,7 @@ class DrmHwcTwo : public hwc2_device_t {
     hwc_frect_t source_crop_;
     int32_t cursor_x_;
     int32_t cursor_y_;
+    hwc_color_t layer_color_;
     HWC2::Transform transform_ = HWC2::Transform::None;
     uint32_t z_order_ = 0;
     android_dataspace_t dataspace_ = HAL_DATASPACE_UNKNOWN;
@@ -143,7 +163,12 @@ class DrmHwcTwo : public hwc2_device_t {
 
     HWC2::Error RegisterVsyncCallback(hwc2_callback_data_t data,
                                       hwc2_function_pointer_t func);
+    void RegisterRefreshCallback(hwc2_callback_data_t data,
+                                 hwc2_function_pointer_t func);
+
     void ClearDisplay();
+
+    std::string Dump();
 
     // HWC Hooks
     HWC2::Error AcceptDisplayChanges();
@@ -165,6 +190,13 @@ class DrmHwcTwo : public hwc2_device_t {
                                    uint32_t *num_elements, hwc2_layer_t *layers,
                                    int32_t *layer_requests);
     HWC2::Error GetDisplayType(int32_t *type);
+#if PLATFORM_SDK_VERSION > 28
+    HWC2::Error GetDisplayIdentificationData(uint8_t *outPort,
+                                             uint32_t *outDataSize,
+                                             uint8_t *outData);
+    HWC2::Error GetDisplayCapabilities(uint32_t *outNumCapabilities,
+                                       uint32_t *outCapabilities);
+#endif
     HWC2::Error GetDozeSupport(int32_t *support);
     HWC2::Error GetHdrCapabilities(uint32_t *num_types, int32_t *types,
                                    float *max_luminance,
@@ -194,6 +226,12 @@ class DrmHwcTwo : public hwc2_device_t {
     HWC2::Error CreateComposition(bool test);
     void AddFenceToPresentFence(int fd);
     bool HardwareSupportsLayerType(HWC2::Composition comp_type);
+    uint32_t CalcPixOps(std::map<uint32_t, DrmHwcTwo::HwcLayer *> &z_map,
+                        size_t first_z, size_t size);
+    void MarkValidated(std::map<uint32_t, DrmHwcTwo::HwcLayer *> &z_map,
+                       size_t client_first_z, size_t client_size);
+
+    constexpr static size_t MATRIX_SIZE = 16;
 
     ResourceManager *resource_manager_;
     DrmDevice *drm_;
@@ -214,8 +252,29 @@ class DrmHwcTwo : public hwc2_device_t {
     HwcLayer client_layer_;
     UniqueFd present_fence_;
     int32_t color_mode_;
+    std::array<float, MATRIX_SIZE> color_transform_matrix_;
+    android_color_transform_t color_transform_hint_;
 
     uint32_t frame_no_ = 0;
+    /* Statistics */
+    struct Stats {
+      Stats minus(Stats b) {
+        return {total_frames_ - b.total_frames_,
+                total_pixops_ - b.total_pixops_,
+                gpu_pixops_ - b.gpu_pixops_,
+                failed_kms_validate_ - b.failed_kms_validate_,
+                failed_kms_present_ - b.failed_kms_present_,
+                frames_flattened_ - b.frames_flattened_};
+      }
+
+      uint32_t total_frames_ = 0;
+      uint64_t total_pixops_ = 0;
+      uint64_t gpu_pixops_ = 0;
+      uint32_t failed_kms_validate_ = 0;
+      uint32_t failed_kms_present_ = 0;
+      uint32_t frames_flattened_ = 0;
+    } total_stats_, prev_stats_;
+    std::string DumpDelta(DrmHwcTwo::HwcDisplay::Stats delta);
   };
 
   class DrmHotplugHandler : public DrmEventHandler {
@@ -289,7 +348,7 @@ class DrmHwcTwo : public hwc2_device_t {
   HWC2::Error CreateVirtualDisplay(uint32_t width, uint32_t height,
                                    int32_t *format, hwc2_display_t *display);
   HWC2::Error DestroyVirtualDisplay(hwc2_display_t display);
-  void Dump(uint32_t *size, char *buffer);
+  void Dump(uint32_t *outSize, char *outBuffer);
   uint32_t GetMaxVirtualDisplayCount();
   HWC2::Error RegisterCallback(int32_t descriptor, hwc2_callback_data_t data,
                                hwc2_function_pointer_t function);
@@ -300,5 +359,7 @@ class DrmHwcTwo : public hwc2_device_t {
   ResourceManager resource_manager_;
   std::map<hwc2_display_t, HwcDisplay> displays_;
   std::map<HWC2::Callback, HwcCallback> callbacks_;
+
+  std::string mDumpString;
 };
 }  // namespace android
