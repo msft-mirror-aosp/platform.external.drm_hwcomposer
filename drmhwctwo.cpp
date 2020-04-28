@@ -273,9 +273,6 @@ HWC2::Error DrmHwcTwo::HwcDisplay::CreateLayer(hwc2_layer_t *layer) {
 
 HWC2::Error DrmHwcTwo::HwcDisplay::DestroyLayer(hwc2_layer_t layer) {
   supported(__func__);
-  if (!get_layer(layer))
-    return HWC2::Error::BadLayer;
-
   layers_.erase(layer);
   return HWC2::Error::None;
 }
@@ -402,73 +399,14 @@ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayConfigs(uint32_t *num_configs,
     }
   }
 
-  // Since the upper layers only look at vactive/hactive/refresh, height and
-  // width, it doesn't differentiate interlaced from progressive and other
-  // similar modes. Depending on the order of modes we return to SF, it could
-  // end up choosing a suboptimal configuration and dropping the preferred
-  // mode. To workaround this, don't offer interlaced modes to SF if there is
-  // at least one non-interlaced alternative and only offer a single WxH@R
-  // mode with at least the prefered mode from in DrmConnector::UpdateModes()
-
-  // TODO: Remove the following block of code until AOSP handles all modes
-  std::vector<DrmMode> sel_modes;
-
-  // Add the preferred mode first to be sure it's not dropped
-  auto mode = std::find_if(connector_->modes().begin(),
-                           connector_->modes().end(), [&](DrmMode const &m) {
-                             return m.id() ==
-                                    connector_->get_preferred_mode_id();
-                           });
-  if (mode != connector_->modes().end())
-    sel_modes.push_back(*mode);
-
-  // Add the active mode if different from preferred mode
-  if (connector_->active_mode().id() != connector_->get_preferred_mode_id())
-    sel_modes.push_back(connector_->active_mode());
-
-  // Cycle over the modes and filter out "similar" modes, keeping only the
-  // first ones in the order given by DRM (from CEA ids and timings order)
-  for (const DrmMode &mode : connector_->modes()) {
-    // TODO: Remove this when 3D Attributes are in AOSP
-    if (mode.flags() & DRM_MODE_FLAG_3D_MASK)
-      continue;
-
-    // TODO: Remove this when the Interlaced attribute is in AOSP
-    if (mode.flags() & DRM_MODE_FLAG_INTERLACE) {
-      auto m = std::find_if(connector_->modes().begin(),
-                            connector_->modes().end(),
-                            [&mode](DrmMode const &m) {
-                              return !(m.flags() & DRM_MODE_FLAG_INTERLACE) &&
-                                     m.h_display() == mode.h_display() &&
-                                     m.v_display() == mode.v_display();
-                            });
-      if (m == connector_->modes().end())
-        sel_modes.push_back(mode);
-
-      continue;
-    }
-
-    // Search for a similar WxH@R mode in the filtered list and drop it if
-    // another mode with the same WxH@R has already been selected
-    // TODO: Remove this when AOSP handles duplicates modes
-    auto m = std::find_if(sel_modes.begin(), sel_modes.end(),
-                          [&mode](DrmMode const &m) {
-                            return m.h_display() == mode.h_display() &&
-                                   m.v_display() == mode.v_display() &&
-                                   m.v_refresh() == mode.v_refresh();
-                          });
-    if (m == sel_modes.end())
-      sel_modes.push_back(mode);
-  }
-
-  auto num_modes = static_cast<uint32_t>(sel_modes.size());
+  auto num_modes = static_cast<uint32_t>(connector_->modes().size());
   if (!configs) {
     *num_configs = num_modes;
     return HWC2::Error::None;
   }
 
   uint32_t idx = 0;
-  for (const DrmMode &mode : sel_modes) {
+  for (const DrmMode &mode : connector_->modes()) {
     if (idx >= *num_configs)
       break;
     configs[idx++] = mode.id();
@@ -735,7 +673,7 @@ HWC2::Error DrmHwcTwo::HwcDisplay::SetColorMode(int32_t mode) {
   supported(__func__);
 
   if (mode != HAL_COLOR_MODE_NATIVE)
-    return HWC2::Error::BadParameter;
+    return HWC2::Error::Unsupported;
 
   color_mode_ = mode;
   return HWC2::Error::None;
@@ -766,12 +704,9 @@ HWC2::Error DrmHwcTwo::HwcDisplay::SetPowerMode(int32_t mode_in) {
     case HWC2::PowerMode::On:
       dpms_value = DRM_MODE_DPMS_ON;
       break;
-    case HWC2::PowerMode::Doze:
-    case HWC2::PowerMode::DozeSuspend:
-      return HWC2::Error::Unsupported;
     default:
       ALOGI("Power mode %d is unsupported\n", mode);
-      return HWC2::Error::BadParameter;
+      return HWC2::Error::Unsupported;
   };
 
   std::unique_ptr<DrmDisplayComposition> composition = compositor_

@@ -48,8 +48,29 @@ Importer *Importer::CreateInstance(DrmDevice *drm) {
   return importer;
 }
 
-#if defined(MALI_GRALLOC_INTFMT_AFBC_BASIC) && \
-    defined(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16)
+HisiImporter::HisiImporter(DrmDevice *drm)
+    : DrmGenericImporter(drm), drm_(drm) {
+}
+
+HisiImporter::~HisiImporter() {
+}
+
+int HisiImporter::Init() {
+  int ret = hw_get_module(GRALLOC_HARDWARE_MODULE_ID,
+                          (const hw_module_t **)&gralloc_);
+  if (ret) {
+    ALOGE("Failed to open gralloc module %d", ret);
+    return ret;
+  }
+
+  if (strcasecmp(gralloc_->common.author, "ARM Ltd."))
+    ALOGW("Using non-ARM gralloc module: %s/%s\n", gralloc_->common.name,
+          gralloc_->common.author);
+
+  return 0;
+}
+
+#ifdef MALI_GRALLOC_INTFMT_AFBC_BASIC
 uint64_t HisiImporter::ConvertGrallocFormatToDrmModifiers(uint64_t flags,
                                                           bool is_rgb) {
   uint64_t features = 0UL;
