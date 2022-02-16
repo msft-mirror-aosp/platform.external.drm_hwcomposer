@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016 The Android Open Source Project
+ * Copyright (C) 2015 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,35 +14,29 @@
  * limitations under the License.
  */
 
-#ifndef ANDROID_UEVENT_LISTENER_H_
-#define ANDROID_UEVENT_LISTENER_H_
-
-#include <functional>
-
-#include "utils/UniqueFd.h"
-#include "utils/Worker.h"
+#include <pthread.h>
 
 namespace android {
 
-class UEventListener : public Worker {
+class AutoLock {
  public:
-  UEventListener();
-  ~UEventListener() override = default;
-
-  int Init();
-
-  void RegisterHotplugHandler(std::function<void()> hotplug_handler) {
-    hotplug_handler_ = std::move(hotplug_handler);
+  AutoLock(pthread_mutex_t *mutex, const char *const name)
+      : mutex_(mutex), name_(name) {
+  }
+  ~AutoLock() {
+    if (locked_)
+      Unlock();
   }
 
- protected:
-  void Routine() override;
+  AutoLock(const AutoLock &rhs) = delete;
+  AutoLock &operator=(const AutoLock &rhs) = delete;
+
+  int Lock();
+  int Unlock();
 
  private:
-  UniqueFd uevent_fd_;
-
-  std::function<void()> hotplug_handler_;
+  pthread_mutex_t *const mutex_;
+  bool locked_ = false;
+  const char *const name_;
 };
 }  // namespace android
-
-#endif
