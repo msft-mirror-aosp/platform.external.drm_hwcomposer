@@ -17,10 +17,9 @@
 #ifndef ANDROID_DRM_PROPERTY_H_
 #define ANDROID_DRM_PROPERTY_H_
 
+#include <stdint.h>
 #include <xf86drmMode.h>
 
-#include <cstdint>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -31,19 +30,18 @@ enum DrmPropertyType {
   DRM_PROPERTY_TYPE_ENUM,
   DRM_PROPERTY_TYPE_OBJECT,
   DRM_PROPERTY_TYPE_BLOB,
-  DRM_PROPERTY_TYPE_BITMASK,
   DRM_PROPERTY_TYPE_INVALID,
 };
 
 class DrmProperty {
  public:
   DrmProperty() = default;
-  DrmProperty(uint32_t obj_id, drmModePropertyPtr p, uint64_t value);
+  DrmProperty(drmModePropertyPtr p, uint64_t value);
   DrmProperty(const DrmProperty &) = delete;
   DrmProperty &operator=(const DrmProperty &) = delete;
 
-  auto Init(uint32_t obj_id, drmModePropertyPtr p, uint64_t value) -> void;
-  std::tuple<uint64_t, int> GetEnumValueWithName(const std::string &name) const;
+  void Init(drmModePropertyPtr p, uint64_t value);
+  std::tuple<uint64_t, int> GetEnumValueWithName(std::string name) const;
 
   uint32_t id() const;
   std::string name() const;
@@ -55,28 +53,16 @@ class DrmProperty {
   std::tuple<int, uint64_t> range_min() const;
   std::tuple<int, uint64_t> range_max() const;
 
-  [[nodiscard]] auto AtomicSet(drmModeAtomicReq &pset, uint64_t value) const
-      -> bool;
-
-  template <class E>
-  auto AddEnumToMap(const std::string &name, E key, std::map<E, uint64_t> &map)
-      -> bool;
-
-  explicit operator bool() const {
-    return id_ != 0;
-  }
-
  private:
   class DrmPropertyEnum {
    public:
-    explicit DrmPropertyEnum(drm_mode_property_enum *e);
-    ~DrmPropertyEnum() = default;
+    DrmPropertyEnum(drm_mode_property_enum *e);
+    ~DrmPropertyEnum();
 
     uint64_t value_;
     std::string name_;
   };
 
-  uint32_t obj_id_ = 0;
   uint32_t id_ = 0;
 
   DrmPropertyType type_ = DRM_PROPERTY_TYPE_INVALID;
@@ -88,21 +74,6 @@ class DrmProperty {
   std::vector<DrmPropertyEnum> enums_;
   std::vector<uint32_t> blob_ids_;
 };
-
-template <class E>
-auto DrmProperty::AddEnumToMap(const std::string &name, E key,
-                               std::map<E, uint64_t> &map) -> bool {
-  uint64_t enum_value = UINT64_MAX;
-  int err = 0;
-  std::tie(enum_value, err) = GetEnumValueWithName(name);
-  if (err == 0) {
-    map[key] = enum_value;
-    return true;
-  }
-
-  return false;
-}
-
 }  // namespace android
 
 #endif  // ANDROID_DRM_PROPERTY_H_
