@@ -22,12 +22,13 @@
 
 namespace android {
 
-bool BackendRCarDu::IsClientLayer(HwcDisplay *display, HwcLayer *layer) {
+bool BackendRCarDu::IsClientLayer(DrmHwcTwo::HwcDisplay *display,
+                                  DrmHwcTwo::HwcLayer *layer) {
   hwc_drm_bo_t bo;
 
-  int ret = BufferInfoGetter::GetInstance()->ConvertBoInfo(layer->GetBuffer(),
+  int ret = BufferInfoGetter::GetInstance()->ConvertBoInfo(layer->buffer(),
                                                            &bo);
-  if (ret != 0)
+  if (ret)
     return true;
 
   if (bo.format == DRM_FORMAT_ABGR8888)
@@ -39,9 +40,6 @@ bool BackendRCarDu::IsClientLayer(HwcDisplay *display, HwcLayer *layer) {
   return Backend::IsClientLayer(display, layer);
 }
 
-// clang-format off
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables, cert-err58-cpp)
 REGISTER_BACKEND("rcar-du", BackendRCarDu);
-// clang-format on
 
 }  // namespace android

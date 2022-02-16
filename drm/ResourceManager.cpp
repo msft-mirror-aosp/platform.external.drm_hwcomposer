@@ -18,24 +18,17 @@
 
 #include "ResourceManager.h"
 
-#include <fcntl.h>
+#include <cutils/properties.h>
+#include <log/log.h>
 #include <sys/stat.h>
 
 #include <sstream>
 
 #include "bufferinfo/BufferInfoGetter.h"
-#include "drm/DrmDevice.h"
-#include "drm/DrmPlane.h"
-#include "utils/log.h"
-#include "utils/properties.h"
 
 namespace android {
 
-ResourceManager::ResourceManager() : num_displays_(0) {
-}
-
-ResourceManager::~ResourceManager() {
-  uevent_listener_.Exit();
+ResourceManager::ResourceManager() : num_displays_(0), gralloc_(NULL) {
 }
 
 int ResourceManager::Init() {
@@ -49,50 +42,91 @@ int ResourceManager::Init() {
     ret = AddDrmDevice(std::string(path_pattern));
   } else {
     path_pattern[path_len - 1] = '\0';
-    for (int idx = 0; ret == 0; ++idx) {
+    for (int idx = 0; !ret; ++idx) {
       std::ostringstream path;
       path << path_pattern << idx;
 
-      struct stat buf {};
-      if (stat(path.str().c_str(), &buf) != 0)
+      struct stat buf;
+      if (stat(path.str().c_str(), &buf)) {
         break;
-
-      if (DrmDevice::IsKMSDev(path.str().c_str()))
+      } else if (IsKMSDev(path.str().c_str())) {
         ret = AddDrmDevice(path.str());
+      }
     }
   }
 
-  if (num_displays_ == 0) {
+  if (!num_displays_) {
     ALOGE("Failed to initialize any displays");
-    return ret != 0 ? -EINVAL : ret;
+    return ret ? -EINVAL : ret;
   }
 
   char scale_with_gpu[PROPERTY_VALUE_MAX];
   property_get("vendor.hwc.drm.scale_with_gpu", scale_with_gpu, "0");
   scale_with_gpu_ = bool(strncmp(scale_with_gpu, "0", 1));
 
-  if (BufferInfoGetter::GetInstance() == nullptr) {
+  if (!BufferInfoGetter::GetInstance()) {
     ALOGE("Failed to initialize BufferInfoGetter");
     return -EINVAL;
   }
 
-  ret = uevent_listener_.Init();
-  if (ret != 0) {
-    ALOGE("Can't initialize event listener %d", ret);
-    return ret;
-  }
-
-  return 0;
+  return hw_get_module(GRALLOC_HARDWARE_MODULE_ID,
+                       (const hw_module_t **)&gralloc_);
 }
 
-int ResourceManager::AddDrmDevice(const std::string &path) {
-  auto drm = std::make_unique<DrmDevice>();
-  int displays_added = 0;
-  int ret = 0;
+int ResourceManager::AddDrmDevice(std::string path) {
+  std::unique_ptr<DrmDevice> drm = std::make_unique<DrmDevice>();
+  int displays_added, ret;
   std::tie(ret, displays_added) = drm->Init(path.c_str(), num_displays_);
+  if (ret)
+    return ret;
+  std::shared_ptr<Importer> importer;
+  importer.reset(new DrmGenericImporter(drm.get()));
+  if (!importer) {
+    ALOGE("Failed to create importer instance");
+    return -ENODEV;
+  }
+  importers_.push_back(importer);
   drms_.push_back(std::move(drm));
   num_displays_ += displays_added;
   return ret;
+}
+
+DrmConnector *ResourceManager::AvailableWritebackConnector(int display) {
+  DrmDevice *drm_device = GetDrmDevice(display);
+  DrmConnector *writeback_conn = NULL;
+  if (drm_device) {
+    writeback_conn = drm_device->AvailableWritebackConnector(display);
+    if (writeback_conn)
+      return writeback_conn;
+  }
+  for (auto &drm : drms_) {
+    if (drm.get() == drm_device)
+      continue;
+    writeback_conn = drm->AvailableWritebackConnector(display);
+    if (writeback_conn)
+      return writeback_conn;
+  }
+  return writeback_conn;
+}
+
+bool ResourceManager::IsKMSDev(const char *path) {
+  int fd = open(path, O_RDWR | O_CLOEXEC);
+  if (fd < 0)
+    return false;
+
+  auto res = drmModeGetResources(fd);
+  if (!res) {
+    close(fd);
+    return false;
+  }
+
+  bool is_kms = res->count_crtcs > 0 && res->count_connectors > 0 &&
+                res->count_encoders > 0;
+
+  drmModeFreeResources(res);
+  close(fd);
+
+  return is_kms;
 }
 
 DrmDevice *ResourceManager::GetDrmDevice(int display) {
@@ -100,6 +134,18 @@ DrmDevice *ResourceManager::GetDrmDevice(int display) {
     if (drm->HandlesDisplay(display))
       return drm.get();
   }
-  return nullptr;
+  return NULL;
+}
+
+std::shared_ptr<Importer> ResourceManager::GetImporter(int display) {
+  for (unsigned int i = 0; i < drms_.size(); i++) {
+    if (drms_[i]->HandlesDisplay(display))
+      return importers_[i];
+  }
+  return NULL;
+}
+
+const gralloc_module_t *ResourceManager::gralloc() {
+  return gralloc_;
 }
 }  // namespace android

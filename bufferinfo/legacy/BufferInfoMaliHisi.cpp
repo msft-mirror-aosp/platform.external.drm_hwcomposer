@@ -18,13 +18,13 @@
 
 #include "BufferInfoMaliHisi.h"
 
+#include <log/log.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
 #include <cinttypes>
 
 #include "gralloc_priv.h"
-#include "utils/log.h"
 
 #define MALI_ALIGN(value, base) (((value) + ((base)-1)) & ~((base)-1))
 
@@ -68,9 +68,10 @@ uint64_t BufferInfoMaliHisi::ConvertGrallocFormatToDrmModifiers(
 
 int BufferInfoMaliHisi::ConvertBoInfo(buffer_handle_t handle,
                                       hwc_drm_bo_t *bo) {
-  bool is_rgb = false;
+  bool is_rgb;
 
-  const auto *hnd = (private_handle_t const *)handle;
+  private_handle_t const *hnd = reinterpret_cast<private_handle_t const *>(
+      handle);
   if (!hnd)
     return -EINVAL;
 
@@ -118,6 +119,8 @@ int BufferInfoMaliHisi::ConvertBoInfo(buffer_handle_t handle,
     default:
       break;
   }
+
+  bo->with_modifiers = true;
 
   return 0;
 }

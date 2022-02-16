@@ -17,19 +17,17 @@
 #ifndef ANDROID_DRM_PLANE_H_
 #define ANDROID_DRM_PLANE_H_
 
+#include <stdint.h>
 #include <xf86drmMode.h>
 
-#include <cstdint>
 #include <vector>
 
 #include "DrmCrtc.h"
 #include "DrmProperty.h"
-#include "drmhwcomposer.h"
 
 namespace android {
 
 class DrmDevice;
-struct DrmHwcLayer;
 
 class DrmPlane {
  public:
@@ -39,31 +37,37 @@ class DrmPlane {
 
   int Init();
 
-  bool GetCrtcSupported(const DrmCrtc &crtc) const;
-  bool IsValidForLayer(DrmHwcLayer *layer);
+  uint32_t id() const;
 
-  uint32_t GetType() const;
+  bool GetCrtcSupported(const DrmCrtc &crtc) const;
+
+  uint32_t type() const;
 
   bool IsFormatSupported(uint32_t format) const;
-  bool HasNonRgbFormat() const;
 
-  auto AtomicSetState(drmModeAtomicReq &pset, DrmHwcLayer &layer, uint32_t zpos,
-                      uint32_t crtc_id) -> int;
-  auto AtomicDisablePlane(drmModeAtomicReq &pset) -> int;
-  const DrmProperty &GetZPosProperty() const;
+  const DrmProperty &crtc_property() const;
+  const DrmProperty &fb_property() const;
+  const DrmProperty &crtc_x_property() const;
+  const DrmProperty &crtc_y_property() const;
+  const DrmProperty &crtc_w_property() const;
+  const DrmProperty &crtc_h_property() const;
+  const DrmProperty &src_x_property() const;
+  const DrmProperty &src_y_property() const;
+  const DrmProperty &src_w_property() const;
+  const DrmProperty &src_h_property() const;
+  const DrmProperty &zpos_property() const;
+  const DrmProperty &rotation_property() const;
+  const DrmProperty &alpha_property() const;
+  const DrmProperty &blend_property() const;
+  const DrmProperty &in_fence_fd_property() const;
 
  private:
   DrmDevice *drm_;
   uint32_t id_;
 
-  enum class Presence { kOptional, kMandatory };
-
-  auto GetPlaneProperty(const char *prop_name, DrmProperty &property,
-                        Presence presence = Presence::kMandatory) -> bool;
-
   uint32_t possible_crtc_mask_;
 
-  uint32_t type_{};
+  uint32_t type_;
 
   std::vector<uint32_t> formats_;
 
@@ -82,13 +86,6 @@ class DrmPlane {
   DrmProperty alpha_property_;
   DrmProperty blend_property_;
   DrmProperty in_fence_fd_property_;
-  DrmProperty color_encoding_propery_;
-  DrmProperty color_range_property_;
-
-  std::map<DrmHwcBlending, uint64_t> blending_enum_map_;
-  std::map<DrmHwcColorSpace, uint64_t> color_encoding_enum_map_;
-  std::map<DrmHwcSampleRange, uint64_t> color_range_enum_map_;
-  std::map<DrmHwcTransform, uint64_t> transform_enum_map_;
 };
 }  // namespace android
 
