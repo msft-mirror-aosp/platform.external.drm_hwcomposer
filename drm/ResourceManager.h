@@ -17,11 +17,10 @@
 #ifndef RESOURCEMANAGER_H
 #define RESOURCEMANAGER_H
 
-#include <cstring>
+#include <string.h>
 
 #include "DrmDevice.h"
-#include "DrmFbImporter.h"
-#include "UEventListener.h"
+#include "DrmGenericImporter.h"
 
 namespace android {
 
@@ -30,39 +29,31 @@ class ResourceManager {
   ResourceManager();
   ResourceManager(const ResourceManager &) = delete;
   ResourceManager &operator=(const ResourceManager &) = delete;
-  ~ResourceManager();
-
   int Init();
   DrmDevice *GetDrmDevice(int display);
-  const std::vector<std::unique_ptr<DrmDevice>> &GetDrmDevices() const {
+  std::shared_ptr<Importer> GetImporter(int display);
+  const gralloc_module_t *gralloc();
+  DrmConnector *AvailableWritebackConnector(int display);
+  const std::vector<std::unique_ptr<DrmDevice>> &getDrmDevices() const {
     return drms_;
   }
-  int GetDisplayCount() const {
+  int getDisplayCount() const {
     return num_displays_;
   }
-  bool ForcedScalingWithGpu() const {
+  bool ForcedScalingWithGpu() {
     return scale_with_gpu_;
   }
 
-  UEventListener *GetUEventListener() {
-    return &uevent_listener_;
-  }
-
-  auto &GetMainLock() {
-    return main_lock_;
-  }
-
  private:
-  int AddDrmDevice(std::string const &path);
+  int AddDrmDevice(std::string path);
+  static bool IsKMSDev(const char *path);
 
   int num_displays_;
   std::vector<std::unique_ptr<DrmDevice>> drms_;
+  std::vector<std::shared_ptr<Importer>> importers_;
+  const gralloc_module_t *gralloc_;
 
-  bool scale_with_gpu_{};
-
-  UEventListener uevent_listener_;
-
-  std::mutex main_lock_;
+  bool scale_with_gpu_;
 };
 }  // namespace android
 
