@@ -18,36 +18,34 @@
 
 #include "DrmDevice.h"
 
+#include <cutils/properties.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <log/log.h>
+#include <stdint.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <cinttypes>
-#include <cstdint>
 #include <sstream>
 #include <string>
 
-#include "drm/DrmPlane.h"
-#include "utils/log.h"
-#include "utils/properties.h"
-
-static void trim_left(std::string *str) {
-  str->erase(std::begin(*str),
-             std::find_if(std::begin(*str), std::end(*str),
-                          [](int ch) { return std::isspace(ch) == 0; }));
+static void trim_left(std::string &str) {
+  str.erase(std::begin(str),
+            std::find_if(std::begin(str), std::end(str),
+                         [](int ch) { return !std::isspace(ch); }));
 }
 
-static void trim_right(std::string *str) {
-  str->erase(std::find_if(std::rbegin(*str), std::rend(*str),
-                          [](int ch) { return std::isspace(ch) == 0; })
-                 .base(),
-             std::end(*str));
+static void trim_right(std::string &str) {
+  str.erase(std::find_if(std::rbegin(str), std::rend(str),
+                         [](int ch) { return !std::isspace(ch); })
+                .base(),
+            std::end(str));
 }
 
-static void trim(std::string *str) {
+static void trim(std::string &str) {
   trim_left(str);
   trim_right(str);
 }
@@ -55,25 +53,25 @@ static void trim(std::string *str) {
 namespace android {
 
 static std::vector<std::string> read_primary_display_order_prop() {
-  std::array<char, PROPERTY_VALUE_MAX> display_order_buf{};
+  std::array<char, PROPERTY_VALUE_MAX> display_order_buf;
   property_get("vendor.hwc.drm.primary_display_order", display_order_buf.data(),
                "...");
 
   std::vector<std::string> display_order;
   std::istringstream str(display_order_buf.data());
-  for (std::string conn_name; std::getline(str, conn_name, ',');) {
-    trim(&conn_name);
+  for (std::string conn_name = ""; std::getline(str, conn_name, ',');) {
+    trim(conn_name);
     display_order.push_back(std::move(conn_name));
   }
   return display_order;
 }
 
 static std::vector<DrmConnector *> make_primary_display_candidates(
-    const std::vector<std::unique_ptr<DrmConnector>> &connectors) {
+    std::vector<std::unique_ptr<DrmConnector>> &connectors) {
   std::vector<DrmConnector *> primary_candidates;
   std::transform(std::begin(connectors), std::end(connectors),
                  std::back_inserter(primary_candidates),
-                 [](const std::unique_ptr<DrmConnector> &conn) {
+                 [](std::unique_ptr<DrmConnector> &conn) {
                    return conn.get();
                  });
   primary_candidates.erase(std::remove_if(std::begin(primary_candidates),
@@ -112,17 +110,17 @@ static std::vector<DrmConnector *> make_primary_display_candidates(
   return primary_candidates;
 }
 
-DrmDevice::DrmDevice() {
-  self.reset(this);
-  mDrmFbImporter = std::make_unique<DrmFbImporter>(self);
+DrmDevice::DrmDevice() : event_listener_(this) {
 }
 
-// NOLINTNEXTLINE (readability-function-cognitive-complexity): Fixme
+DrmDevice::~DrmDevice() {
+  event_listener_.Exit();
+}
+
 std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
   /* TODO: Use drmOpenControl here instead */
-  fd_ = UniqueFd(open(path, O_RDWR | O_CLOEXEC));
+  fd_.Set(open(path, O_RDWR));
   if (fd() < 0) {
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): Fixme
     ALOGE("Failed to open dri %s: %s", path, strerror(errno));
     return std::make_tuple(-ENODEV, 0);
   }
@@ -147,20 +145,7 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
   }
 #endif
 
-  uint64_t cap_value = 0;
-  if (drmGetCap(fd(), DRM_CAP_ADDFB2_MODIFIERS, &cap_value)) {
-    ALOGW("drmGetCap failed. Fallback to no modifier support.");
-    cap_value = 0;
-  }
-  HasAddFb2ModifiersSupport_ = cap_value != 0;
-
-  drmSetMaster(fd());
-  if (!drmIsMaster(fd())) {
-    ALOGE("DRM/KMS master access required");
-    return std::make_tuple(-EACCES, 0);
-  }
-
-  auto res = MakeDrmModeResUnique(fd());
+  drmModeResPtr res = drmModeGetResources(fd());
   if (!res) {
     ALOGE("Failed to get DrmDevice resources");
     return std::make_tuple(-ENODEV, 0);
@@ -176,14 +161,15 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
   bool found_primary = num_displays != 0;
 
   for (int i = 0; !ret && i < res->count_crtcs; ++i) {
-    auto c = MakeDrmModeCrtcUnique(fd(), res->crtcs[i]);
+    drmModeCrtcPtr c = drmModeGetCrtc(fd(), res->crtcs[i]);
     if (!c) {
       ALOGE("Failed to get crtc %d", res->crtcs[i]);
       ret = -ENODEV;
       break;
     }
 
-    std::unique_ptr<DrmCrtc> crtc(new DrmCrtc(this, c.get(), i));
+    std::unique_ptr<DrmCrtc> crtc(new DrmCrtc(this, c, i));
+    drmModeFreeCrtc(c);
 
     ret = crtc->Init();
     if (ret) {
@@ -193,9 +179,9 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
     crtcs_.emplace_back(std::move(crtc));
   }
 
-  std::vector<uint32_t> possible_clones;
+  std::vector<int> possible_clones;
   for (int i = 0; !ret && i < res->count_encoders; ++i) {
-    auto e = MakeDrmModeEncoderUnique(fd(), res->encoders[i]);
+    drmModeEncoderPtr e = drmModeGetEncoder(fd(), res->encoders[i]);
     if (!e) {
       ALOGE("Failed to get encoder %d", res->encoders[i]);
       ret = -ENODEV;
@@ -203,7 +189,7 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
     }
 
     std::vector<DrmCrtc *> possible_crtcs;
-    DrmCrtc *current_crtc = nullptr;
+    DrmCrtc *current_crtc = NULL;
     for (auto &crtc : crtcs_) {
       if ((1 << crtc->pipe()) & e->possible_crtcs)
         possible_crtcs.push_back(crtc.get());
@@ -213,8 +199,9 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
     }
 
     std::unique_ptr<DrmEncoder> enc(
-        new DrmEncoder(e.get(), current_crtc, possible_crtcs));
+        new DrmEncoder(e, current_crtc, possible_crtcs));
     possible_clones.push_back(e->possible_clones);
+    drmModeFreeEncoder(e);
 
     encoders_.emplace_back(std::move(enc));
   }
@@ -226,7 +213,7 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
   }
 
   for (int i = 0; !ret && i < res->count_connectors; ++i) {
-    auto c = MakeDrmModeConnectorUnique(fd(), res->connectors[i]);
+    drmModeConnectorPtr c = drmModeGetConnector(fd(), res->connectors[i]);
     if (!c) {
       ALOGE("Failed to get connector %d", res->connectors[i]);
       ret = -ENODEV;
@@ -234,7 +221,7 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
     }
 
     std::vector<DrmEncoder *> possible_encoders;
-    DrmEncoder *current_encoder = nullptr;
+    DrmEncoder *current_encoder = NULL;
     for (int j = 0; j < c->count_encoders; ++j) {
       for (auto &encoder : encoders_) {
         if (encoder->id() == c->encoders[j])
@@ -245,7 +232,9 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
     }
 
     std::unique_ptr<DrmConnector> conn(
-        new DrmConnector(this, c.get(), current_encoder, possible_encoders));
+        new DrmConnector(this, c, current_encoder, possible_encoders));
+
+    drmModeFreeConnector(c);
 
     ret = conn->Init();
     if (ret) {
@@ -294,25 +283,30 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
     }
   }
 
+  if (res)
+    drmModeFreeResources(res);
+
   // Catch-all for the above loops
   if (ret)
     return std::make_tuple(ret, 0);
 
-  auto plane_res = MakeDrmModePlaneResUnique(fd());
+  drmModePlaneResPtr plane_res = drmModeGetPlaneResources(fd());
   if (!plane_res) {
     ALOGE("Failed to get plane resources");
     return std::make_tuple(-ENOENT, 0);
   }
 
   for (uint32_t i = 0; i < plane_res->count_planes; ++i) {
-    auto p = MakeDrmModePlaneUnique(fd(), plane_res->planes[i]);
+    drmModePlanePtr p = drmModeGetPlane(fd(), plane_res->planes[i]);
     if (!p) {
       ALOGE("Failed to get plane %d", plane_res->planes[i]);
       ret = -ENODEV;
       break;
     }
 
-    std::unique_ptr<DrmPlane> plane(new DrmPlane(this, p.get()));
+    std::unique_ptr<DrmPlane> plane(new DrmPlane(this, p));
+
+    drmModeFreePlane(p);
 
     ret = plane->Init();
     if (ret) {
@@ -322,14 +316,24 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
 
     planes_.emplace_back(std::move(plane));
   }
+  drmModeFreePlaneResources(plane_res);
   if (ret)
     return std::make_tuple(ret, 0);
+
+  ret = event_listener_.Init();
+  if (ret) {
+    ALOGE("Can't initialize event listener %d", ret);
+    return std::make_tuple(ret, 0);
+  }
 
   for (auto &conn : connectors_) {
     ret = CreateDisplayPipe(conn.get());
     if (ret) {
       ALOGE("Failed CreateDisplayPipe %d with %d", conn->id(), ret);
       return std::make_tuple(ret, 0);
+    }
+    if (!AttachWriteback(conn.get())) {
+      ALOGI("Display %d has writeback attach to it", conn->display());
     }
   }
   return std::make_tuple(ret, displays_.size());
@@ -340,19 +344,60 @@ bool DrmDevice::HandlesDisplay(int display) const {
 }
 
 DrmConnector *DrmDevice::GetConnectorForDisplay(int display) const {
-  for (const auto &conn : connectors_) {
+  for (auto &conn : connectors_) {
     if (conn->display() == display)
       return conn.get();
   }
-  return nullptr;
+  return NULL;
+}
+
+DrmConnector *DrmDevice::GetWritebackConnectorForDisplay(int display) const {
+  for (auto &conn : writeback_connectors_) {
+    if (conn->display() == display)
+      return conn.get();
+  }
+  return NULL;
+}
+
+// TODO what happens when hotplugging
+DrmConnector *DrmDevice::AvailableWritebackConnector(int display) const {
+  DrmConnector *writeback_conn = GetWritebackConnectorForDisplay(display);
+  DrmConnector *display_conn = GetConnectorForDisplay(display);
+  // If we have a writeback already attached to the same CRTC just use that,
+  // if possible.
+  if (display_conn && writeback_conn &&
+      writeback_conn->encoder()->CanClone(display_conn->encoder()))
+    return writeback_conn;
+
+  // Use another CRTC if available and doesn't have any connector
+  for (auto &crtc : crtcs_) {
+    if (crtc->display() == display)
+      continue;
+    display_conn = GetConnectorForDisplay(crtc->display());
+    // If we have a display connected don't use it for writeback
+    if (display_conn && display_conn->state() == DRM_MODE_CONNECTED)
+      continue;
+    writeback_conn = GetWritebackConnectorForDisplay(crtc->display());
+    if (writeback_conn)
+      return writeback_conn;
+  }
+  return NULL;
 }
 
 DrmCrtc *DrmDevice::GetCrtcForDisplay(int display) const {
-  for (const auto &crtc : crtcs_) {
+  for (auto &crtc : crtcs_) {
     if (crtc->display() == display)
       return crtc.get();
   }
-  return nullptr;
+  return NULL;
+}
+
+DrmPlane *DrmDevice::GetPlane(uint32_t id) const {
+  for (auto &plane : planes_) {
+    if (plane->id() == id)
+      return plane.get();
+  }
+  return NULL;
 }
 
 const std::vector<std::unique_ptr<DrmCrtc>> &DrmDevice::crtcs() const {
@@ -396,9 +441,7 @@ int DrmDevice::CreateDisplayPipe(DrmConnector *connector) {
     int ret = TryEncoderForDisplay(display, connector->encoder());
     if (!ret) {
       return 0;
-    }
-
-    if (ret != -EAGAIN) {
+    } else if (ret != -EAGAIN) {
       ALOGE("Could not set mode %d/%d", display, ret);
       return ret;
     }
@@ -409,9 +452,7 @@ int DrmDevice::CreateDisplayPipe(DrmConnector *connector) {
     if (!ret) {
       connector->set_encoder(enc);
       return 0;
-    }
-
-    if (ret != -EAGAIN) {
+    } else if (ret != -EAGAIN) {
       ALOGE("Could not set mode %d/%d", display, ret);
       return ret;
     }
@@ -421,35 +462,72 @@ int DrmDevice::CreateDisplayPipe(DrmConnector *connector) {
   return -ENODEV;
 }
 
-auto DrmDevice::RegisterUserPropertyBlob(void *data, size_t length) const
-    -> DrmModeUserPropertyBlobUnique {
-  struct drm_mode_create_blob create_blob {};
+// Attach writeback connector to the CRTC linked to the display_conn
+int DrmDevice::AttachWriteback(DrmConnector *display_conn) {
+  DrmCrtc *display_crtc = display_conn->encoder()->crtc();
+  if (GetWritebackConnectorForDisplay(display_crtc->display()) != NULL) {
+    ALOGE("Display already has writeback attach to it");
+    return -EINVAL;
+  }
+  for (auto &writeback_conn : writeback_connectors_) {
+    if (writeback_conn->display() >= 0)
+      continue;
+    for (DrmEncoder *writeback_enc : writeback_conn->possible_encoders()) {
+      for (DrmCrtc *possible_crtc : writeback_enc->possible_crtcs()) {
+        if (possible_crtc != display_crtc)
+          continue;
+        // Use just encoders which had not been bound already
+        if (writeback_enc->can_bind(display_crtc->display())) {
+          writeback_enc->set_crtc(display_crtc);
+          writeback_conn->set_encoder(writeback_enc);
+          writeback_conn->set_display(display_crtc->display());
+          writeback_conn->UpdateModes();
+          return 0;
+        }
+      }
+    }
+  }
+  return -EINVAL;
+}
+
+int DrmDevice::CreatePropertyBlob(void *data, size_t length,
+                                  uint32_t *blob_id) {
+  struct drm_mode_create_blob create_blob;
+  memset(&create_blob, 0, sizeof(create_blob));
   create_blob.length = length;
   create_blob.data = (__u64)data;
 
   int ret = drmIoctl(fd(), DRM_IOCTL_MODE_CREATEPROPBLOB, &create_blob);
   if (ret) {
     ALOGE("Failed to create mode property blob %d", ret);
-    return {};
+    return ret;
   }
+  *blob_id = create_blob.blob_id;
+  return 0;
+}
 
-  return DrmModeUserPropertyBlobUnique(
-      new uint32_t(create_blob.blob_id), [this](const uint32_t *it) {
-        struct drm_mode_destroy_blob destroy_blob {};
-        destroy_blob.blob_id = (__u32)*it;
-        int err = drmIoctl(fd(), DRM_IOCTL_MODE_DESTROYPROPBLOB, &destroy_blob);
-        if (err != 0) {
-          ALOGE("Failed to destroy mode property blob %" PRIu32 "/%d", *it,
-                err);
-        }
-        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
-        delete it;
-      });
+int DrmDevice::DestroyPropertyBlob(uint32_t blob_id) {
+  if (!blob_id)
+    return 0;
+
+  struct drm_mode_destroy_blob destroy_blob;
+  memset(&destroy_blob, 0, sizeof(destroy_blob));
+  destroy_blob.blob_id = (__u32)blob_id;
+  int ret = drmIoctl(fd(), DRM_IOCTL_MODE_DESTROYPROPBLOB, &destroy_blob);
+  if (ret) {
+    ALOGE("Failed to destroy mode property blob %" PRIu32 "/%d", blob_id, ret);
+    return ret;
+  }
+  return 0;
+}
+
+DrmEventListener *DrmDevice::event_listener() {
+  return &event_listener_;
 }
 
 int DrmDevice::GetProperty(uint32_t obj_id, uint32_t obj_type,
-                           const char *prop_name, DrmProperty *property) const {
-  drmModeObjectPropertiesPtr props = nullptr;
+                           const char *prop_name, DrmProperty *property) {
+  drmModeObjectPropertiesPtr props;
 
   props = drmModeObjectGetProperties(fd(), obj_id, obj_type);
   if (!props) {
@@ -461,7 +539,7 @@ int DrmDevice::GetProperty(uint32_t obj_id, uint32_t obj_type,
   for (int i = 0; !found && (size_t)i < props->count_props; ++i) {
     drmModePropertyPtr p = drmModeGetProperty(fd(), props->props[i]);
     if (!strcmp(p->name, prop_name)) {
-      property->Init(obj_id, p, props->prop_values[i]);
+      property->Init(p, props->prop_values[i]);
       found = true;
     }
     drmModeFreeProperty(p);
@@ -471,22 +549,27 @@ int DrmDevice::GetProperty(uint32_t obj_id, uint32_t obj_type,
   return found ? 0 : -ENOENT;
 }
 
+int DrmDevice::GetPlaneProperty(const DrmPlane &plane, const char *prop_name,
+                                DrmProperty *property) {
+  return GetProperty(plane.id(), DRM_MODE_OBJECT_PLANE, prop_name, property);
+}
+
 int DrmDevice::GetCrtcProperty(const DrmCrtc &crtc, const char *prop_name,
-                               DrmProperty *property) const {
+                               DrmProperty *property) {
   return GetProperty(crtc.id(), DRM_MODE_OBJECT_CRTC, prop_name, property);
 }
 
 int DrmDevice::GetConnectorProperty(const DrmConnector &connector,
                                     const char *prop_name,
-                                    DrmProperty *property) const {
+                                    DrmProperty *property) {
   return GetProperty(connector.id(), DRM_MODE_OBJECT_CONNECTOR, prop_name,
                      property);
 }
 
-std::string DrmDevice::GetName() const {
-  auto *ver = drmGetVersion(fd());
+const std::string DrmDevice::GetName() const {
+  auto ver = drmGetVersion(fd_.get());
   if (!ver) {
-    ALOGW("Failed to get drm version for fd=%d", fd());
+    ALOGW("Failed to get drm version for fd=%d", fd_.get());
     return "generic";
   }
 
@@ -494,22 +577,4 @@ std::string DrmDevice::GetName() const {
   drmFreeVersion(ver);
   return name;
 }
-
-auto DrmDevice::IsKMSDev(const char *path) -> bool {
-  auto fd = UniqueFd(open(path, O_RDWR | O_CLOEXEC));
-  if (!fd) {
-    return false;
-  }
-
-  auto res = MakeDrmModeResUnique(fd.Get());
-  if (!res) {
-    return false;
-  }
-
-  bool is_kms = res->count_crtcs > 0 && res->count_connectors > 0 &&
-                res->count_encoders > 0;
-
-  return is_kms;
-}
-
 }  // namespace android
