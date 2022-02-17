@@ -17,28 +17,30 @@
 #ifndef ANDROID_DRM_H_
 #define ANDROID_DRM_H_
 
-#include <stdint.h>
-
+#include <cstdint>
 #include <map>
 #include <tuple>
 
 #include "DrmConnector.h"
 #include "DrmCrtc.h"
 #include "DrmEncoder.h"
-#include "DrmEventListener.h"
-#include "DrmPlane.h"
+#include "DrmFbImporter.h"
+#include "utils/UniqueFd.h"
 
 namespace android {
+
+class DrmFbImporter;
+class DrmPlane;
 
 class DrmDevice {
  public:
   DrmDevice();
-  ~DrmDevice();
+  ~DrmDevice() = default;
 
   std::tuple<int, int> Init(const char *path, int num_displays);
 
   int fd() const {
-    return fd_.get();
+    return fd_.Get();
   }
 
   const std::vector<std::unique_ptr<DrmConnector>> &connectors() const {
@@ -58,38 +60,40 @@ class DrmDevice {
   }
 
   DrmConnector *GetConnectorForDisplay(int display) const;
-  DrmConnector *GetWritebackConnectorForDisplay(int display) const;
-  DrmConnector *AvailableWritebackConnector(int display) const;
   DrmCrtc *GetCrtcForDisplay(int display) const;
-  DrmPlane *GetPlane(uint32_t id) const;
-  DrmEventListener *event_listener();
 
-  int GetPlaneProperty(const DrmPlane &plane, const char *prop_name,
-                       DrmProperty *property);
   int GetCrtcProperty(const DrmCrtc &crtc, const char *prop_name,
-                      DrmProperty *property);
+                      DrmProperty *property) const;
   int GetConnectorProperty(const DrmConnector &connector, const char *prop_name,
-                           DrmProperty *property);
+                           DrmProperty *property) const;
 
-  const std::string GetName() const;
+  std::string GetName() const;
 
   const std::vector<std::unique_ptr<DrmCrtc>> &crtcs() const;
   uint32_t next_mode_id();
 
-  int CreatePropertyBlob(void *data, size_t length, uint32_t *blob_id);
-  int DestroyPropertyBlob(uint32_t blob_id);
+  auto RegisterUserPropertyBlob(void *data, size_t length) const
+      -> DrmModeUserPropertyBlobUnique;
+
   bool HandlesDisplay(int display) const;
-  void RegisterHotplugHandler(DrmEventHandler *handler) {
-    event_listener_.RegisterHotplugHandler(handler);
+
+  bool HasAddFb2ModifiersSupport() const {
+    return HasAddFb2ModifiersSupport_;
   }
+
+  DrmFbImporter &GetDrmFbImporter() {
+    return *mDrmFbImporter;
+  }
+
+  static auto IsKMSDev(const char *path) -> bool;
+
+  int GetProperty(uint32_t obj_id, uint32_t obj_type, const char *prop_name,
+                  DrmProperty *property) const;
 
  private:
   int TryEncoderForDisplay(int display, DrmEncoder *enc);
-  int GetProperty(uint32_t obj_id, uint32_t obj_type, const char *prop_name,
-                  DrmProperty *property);
 
   int CreateDisplayPipe(DrmConnector *connector);
-  int AttachWriteback(DrmConnector *display_conn);
 
   UniqueFd fd_;
   uint32_t mode_id_ = 0;
@@ -99,11 +103,16 @@ class DrmDevice {
   std::vector<std::unique_ptr<DrmEncoder>> encoders_;
   std::vector<std::unique_ptr<DrmCrtc>> crtcs_;
   std::vector<std::unique_ptr<DrmPlane>> planes_;
-  DrmEventListener event_listener_;
 
   std::pair<uint32_t, uint32_t> min_resolution_;
   std::pair<uint32_t, uint32_t> max_resolution_;
   std::map<int, int> displays_;
+
+  bool HasAddFb2ModifiersSupport_{};
+
+  std::shared_ptr<DrmDevice> self;
+
+  std::unique_ptr<DrmFbImporter> mDrmFbImporter;
 };
 }  // namespace android
 
