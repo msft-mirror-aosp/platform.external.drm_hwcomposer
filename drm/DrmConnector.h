@@ -17,15 +17,16 @@
 #ifndef ANDROID_DRM_CONNECTOR_H_
 #define ANDROID_DRM_CONNECTOR_H_
 
-#include <stdint.h>
 #include <xf86drmMode.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
 #include "DrmEncoder.h"
 #include "DrmMode.h"
 #include "DrmProperty.h"
+#include "DrmUnique.h"
 
 namespace android {
 
@@ -41,7 +42,7 @@ class DrmConnector {
 
   int Init();
   int UpdateEdidProperty();
-  int GetEdidBlob(drmModePropertyBlobPtr &blob);
+  auto GetEdidBlob() -> DrmModePropertyBlobUnique;
 
   uint32_t id() const;
 
@@ -81,10 +82,6 @@ class DrmConnector {
   uint32_t mm_width() const;
   uint32_t mm_height() const;
 
-  uint32_t get_preferred_mode_id() const {
-    return preferred_mode_id_;
-  }
-
  private:
   DrmDevice *drm_;
 
@@ -110,8 +107,6 @@ class DrmConnector {
   DrmProperty writeback_out_fence_;
 
   std::vector<DrmEncoder *> possible_encoders_;
-
-  uint32_t preferred_mode_id_;
 };
 }  // namespace android
 

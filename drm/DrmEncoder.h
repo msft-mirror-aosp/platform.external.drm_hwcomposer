@@ -17,9 +17,9 @@
 #ifndef ANDROID_DRM_ENCODER_H_
 #define ANDROID_DRM_ENCODER_H_
 
-#include <stdint.h>
 #include <xf86drmMode.h>
 
+#include <cstdint>
 #include <set>
 #include <vector>
 
@@ -30,7 +30,7 @@ namespace android {
 class DrmEncoder {
  public:
   DrmEncoder(drmModeEncoderPtr e, DrmCrtc *current_crtc,
-             const std::vector<DrmCrtc *> &possible_crtcs);
+             std::vector<DrmCrtc *> possible_crtcs);
   DrmEncoder(const DrmEncoder &) = delete;
   DrmEncoder &operator=(const DrmEncoder &) = delete;
 
