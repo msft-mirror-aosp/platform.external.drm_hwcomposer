@@ -18,19 +18,27 @@
 
 #include "DrmConnector.h"
 
-#include <errno.h>
-#include <log/log.h>
-#include <stdint.h>
 #include <xf86drmMode.h>
 
 #include <array>
+#include <cerrno>
+#include <cstdint>
 #include <sstream>
 
 #include "DrmDevice.h"
+#include "utils/log.h"
+
+#ifndef DRM_MODE_CONNECTOR_SPI
+#define DRM_MODE_CONNECTOR_SPI 19
+#endif
+
+#ifndef DRM_MODE_CONNECTOR_USB
+#define DRM_MODE_CONNECTOR_USB 20
+#endif
 
 namespace android {
 
-constexpr size_t TYPES_COUNT = 17;
+constexpr size_t kTypesCount = 21;
 
 DrmConnector::DrmConnector(DrmDevice *drm, drmModeConnectorPtr c,
                            DrmEncoder *current_encoder,
@@ -58,7 +66,7 @@ int DrmConnector::Init() {
     ALOGE("Could not get CRTC_ID property\n");
     return ret;
   }
-  ret = UpdateEdidProperty();
+  UpdateEdidProperty();
   if (writeback()) {
     ret = drm_->GetConnectorProperty(*this, "WRITEBACK_PIXEL_FORMATS",
                                      &writeback_pixel_formats_);
@@ -90,20 +98,19 @@ int DrmConnector::UpdateEdidProperty() {
   return ret;
 }
 
-int DrmConnector::GetEdidBlob(drmModePropertyBlobPtr &blob) {
-  uint64_t blob_id;
+auto DrmConnector::GetEdidBlob() -> DrmModePropertyBlobUnique {
+  uint64_t blob_id = 0;
   int ret = UpdateEdidProperty();
-  if (ret) {
-    return ret;
+  if (ret != 0) {
+    return {};
   }
 
   std::tie(ret, blob_id) = edid_property().value();
-  if (ret) {
-    return ret;
+  if (ret != 0) {
+    return {};
   }
 
-  blob = drmModeGetPropertyBlob(drm_->fd(), blob_id);
-  return !blob;
+  return MakeDrmModePropertyBlobUnique(drm_->fd(), blob_id);
 }
 
 uint32_t DrmConnector::id() const {
@@ -121,14 +128,15 @@ void DrmConnector::set_display(int display) {
 bool DrmConnector::internal() const {
   return type_ == DRM_MODE_CONNECTOR_LVDS || type_ == DRM_MODE_CONNECTOR_eDP ||
          type_ == DRM_MODE_CONNECTOR_DSI ||
-         type_ == DRM_MODE_CONNECTOR_VIRTUAL || type_ == DRM_MODE_CONNECTOR_DPI;
+         type_ == DRM_MODE_CONNECTOR_VIRTUAL ||
+         type_ == DRM_MODE_CONNECTOR_DPI || type_ == DRM_MODE_CONNECTOR_SPI;
 }
 
 bool DrmConnector::external() const {
   return type_ == DRM_MODE_CONNECTOR_HDMIA ||
          type_ == DRM_MODE_CONNECTOR_DisplayPort ||
          type_ == DRM_MODE_CONNECTOR_DVID || type_ == DRM_MODE_CONNECTOR_DVII ||
-         type_ == DRM_MODE_CONNECTOR_VGA;
+         type_ == DRM_MODE_CONNECTOR_VGA || type_ == DRM_MODE_CONNECTOR_USB;
 }
 
 bool DrmConnector::writeback() const {
@@ -144,25 +152,24 @@ bool DrmConnector::valid_type() const {
 }
 
 std::string DrmConnector::name() const {
-  constexpr std::array<const char *, TYPES_COUNT> names =
-      {"None",   "VGA",  "DVI-I",     "DVI-D",   "DVI-A", "Composite",
-       "SVIDEO", "LVDS", "Component", "DIN",     "DP",    "HDMI-A",
-       "HDMI-B", "TV",   "eDP",       "Virtual", "DSI"};
+  constexpr std::array<const char *, kTypesCount> kNames =
+      {"None",      "VGA",  "DVI-I",     "DVI-D",   "DVI-A", "Composite",
+       "SVIDEO",    "LVDS", "Component", "DIN",     "DP",    "HDMI-A",
+       "HDMI-B",    "TV",   "eDP",       "Virtual", "DSI",   "DPI",
+       "Writeback", "SPI",  "USB"};
 
-  if (type_ < TYPES_COUNT) {
+  if (type_ < kTypesCount) {
     std::ostringstream name_buf;
-    name_buf << names[type_] << "-" << type_id_;
+    name_buf << kNames[type_] << "-" << type_id_;
     return name_buf.str();
-  } else {
-    ALOGE("Unknown type in connector %d, could not make his name", id_);
-    return "None";
   }
+
+  ALOGE("Unknown type in connector %d, could not make his name", id_);
+  return "None";
 }
 
 int DrmConnector::UpdateModes() {
-  int fd = drm_->fd();
-
-  drmModeConnectorPtr c = drmModeGetConnector(fd, id_);
+  drmModeConnectorPtr c = drmModeGetConnector(drm_->fd(), id_);
   if (!c) {
     ALOGE("Failed to get connector %d", id_);
     return -ENODEV;
@@ -170,33 +177,21 @@ int DrmConnector::UpdateModes() {
 
   state_ = c->connection;
 
-  bool preferred_mode_found = false;
-  std::vector<DrmMode> new_modes;
+  modes_.clear();
   for (int i = 0; i < c->count_modes; ++i) {
     bool exists = false;
     for (const DrmMode &mode : modes_) {
       if (mode == c->modes[i]) {
-        new_modes.push_back(mode);
         exists = true;
         break;
       }
     }
+
     if (!exists) {
-      DrmMode m(&c->modes[i]);
-      m.set_id(drm_->next_mode_id());
-      new_modes.push_back(m);
-    }
-    // Use only the first DRM_MODE_TYPE_PREFERRED mode found
-    if (!preferred_mode_found &&
-        (new_modes.back().type() & DRM_MODE_TYPE_PREFERRED)) {
-      preferred_mode_id_ = new_modes.back().id();
-      preferred_mode_found = true;
+      modes_.emplace_back(DrmMode(&c->modes[i]));
     }
   }
-  modes_.swap(new_modes);
-  if (!preferred_mode_found && modes_.size() != 0) {
-    preferred_mode_id_ = modes_[0].id();
-  }
+
   return 0;
 }
 
