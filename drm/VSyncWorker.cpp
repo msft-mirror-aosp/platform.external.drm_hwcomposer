@@ -18,44 +18,33 @@
 
 #include "VSyncWorker.h"
 
-#include <log/log.h>
-#include <stdlib.h>
-#include <time.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+
+#include "utils/log.h"
 
 namespace android {
 
 VSyncWorker::VSyncWorker()
     : Worker("vsync", HAL_PRIORITY_URGENT_DISPLAY),
-      drm_(NULL),
+      drm_(nullptr),
       display_(-1),
       enabled_(false),
       last_timestamp_(-1) {
 }
 
-VSyncWorker::~VSyncWorker() {
-}
-
-int VSyncWorker::Init(DrmDevice *drm, int display) {
+auto VSyncWorker::Init(DrmDevice *drm, int display,
+                       std::function<void(uint64_t /*timestamp*/)> callback)
+    -> int {
   drm_ = drm;
   display_ = display;
+  callback_ = std::move(callback);
 
   return InitWorker();
-}
-
-void VSyncWorker::RegisterCallback(std::shared_ptr<VsyncCallback> callback) {
-  Lock();
-  callback_ = callback;
-  Unlock();
-}
-
-void VSyncWorker::RegisterClientCallback(hwc2_callback_data_t data,
-                                         hwc2_function_pointer_t hook) {
-  Lock();
-  vsync_callback_data_ = data;
-  vsync_callback_hook_ = reinterpret_cast<HWC2_PFN_VSYNC>(hook);
-  Unlock();
 }
 
 void VSyncWorker::VSyncControl(bool enabled) {
@@ -80,7 +69,7 @@ void VSyncWorker::VSyncControl(bool enabled) {
  *  Thus, we must sleep until timestamp 687 to maintain phase with the last
  *  timestamp.
  */
-int64_t VSyncWorker::GetPhasedVSync(int64_t frame_ns, int64_t current) {
+int64_t VSyncWorker::GetPhasedVSync(int64_t frame_ns, int64_t current) const {
   if (last_timestamp_ < 0)
     return current + frame_ns;
 
@@ -88,28 +77,31 @@ int64_t VSyncWorker::GetPhasedVSync(int64_t frame_ns, int64_t current) {
          last_timestamp_;
 }
 
-static const int64_t kOneSecondNs = 1 * 1000 * 1000 * 1000;
+static const int64_t kOneSecondNs = 1LL * 1000 * 1000 * 1000;
 
 int VSyncWorker::SyntheticWaitVBlank(int64_t *timestamp) {
-  struct timespec vsync;
+  struct timespec vsync {};
   int ret = clock_gettime(CLOCK_MONOTONIC, &vsync);
+  if (ret)
+    return ret;
 
-  float refresh = 60.0f;  // Default to 60Hz refresh rate
+  float refresh = 60.0F;  // Default to 60Hz refresh rate
   DrmConnector *conn = drm_->GetConnectorForDisplay(display_);
-  if (conn && conn->active_mode().v_refresh() != 0.0f)
+  if (conn && conn->active_mode().v_refresh() != 0.0F)
     refresh = conn->active_mode().v_refresh();
   else
     ALOGW("Vsync worker active with conn=%p refresh=%f\n", conn,
-          conn ? conn->active_mode().v_refresh() : 0.0f);
+          conn ? conn->active_mode().v_refresh() : 0.0F);
 
-  int64_t phased_timestamp = GetPhasedVSync(kOneSecondNs / refresh,
+  int64_t phased_timestamp = GetPhasedVSync(kOneSecondNs /
+                                                static_cast<int>(refresh),
                                             vsync.tv_sec * kOneSecondNs +
                                                 vsync.tv_nsec);
   vsync.tv_sec = phased_timestamp / kOneSecondNs;
-  vsync.tv_nsec = phased_timestamp - (vsync.tv_sec * kOneSecondNs);
+  vsync.tv_nsec = int(phased_timestamp - (vsync.tv_sec * kOneSecondNs));
   do {
-    ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &vsync, NULL);
-  } while (ret == -1 && errno == EINTR);
+    ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &vsync, nullptr);
+  } while (ret == EINTR);
   if (ret)
     return ret;
 
@@ -118,7 +110,7 @@ int VSyncWorker::SyntheticWaitVBlank(int64_t *timestamp) {
 }
 
 void VSyncWorker::Routine() {
-  int ret;
+  int ret = 0;
 
   Lock();
   if (!enabled_) {
@@ -130,7 +122,6 @@ void VSyncWorker::Routine() {
   }
 
   int display = display_;
-  std::shared_ptr<VsyncCallback> callback(callback_);
   Unlock();
 
   DrmCrtc *crtc = drm_->GetCrtcForDisplay(display);
@@ -142,15 +133,17 @@ void VSyncWorker::Routine() {
 
   drmVBlank vblank;
   memset(&vblank, 0, sizeof(vblank));
-  vblank.request.type = (drmVBlankSeqType)(
-      DRM_VBLANK_RELATIVE | (high_crtc & DRM_VBLANK_HIGH_CRTC_MASK));
+  vblank.request.type = (drmVBlankSeqType)(DRM_VBLANK_RELATIVE |
+                                           (high_crtc &
+                                            DRM_VBLANK_HIGH_CRTC_MASK));
   vblank.request.sequence = 1;
 
-  int64_t timestamp;
+  int64_t timestamp = 0;
   ret = drmWaitVBlank(drm_->fd(), &vblank);
-  if (ret == -EINTR) {
+  if (ret == -EINTR)
     return;
-  } else if (ret) {
+
+  if (ret) {
     ret = SyntheticWaitVBlank(&timestamp);
     if (ret)
       return;
@@ -162,13 +155,9 @@ void VSyncWorker::Routine() {
   if (!enabled_)
     return;
 
-  if (callback)
-    callback->Callback(display, timestamp);
-
-  Lock();
-  if (enabled_ && vsync_callback_hook_ && vsync_callback_data_)
-    vsync_callback_hook_(vsync_callback_data_, display, timestamp);
-  Unlock();
+  if (callback_) {
+    callback_(timestamp);
+  }
 
   last_timestamp_ = timestamp;
 }
