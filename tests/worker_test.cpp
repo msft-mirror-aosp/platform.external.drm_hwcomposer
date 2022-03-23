@@ -8,13 +8,17 @@
 using android::Worker;
 
 struct TestWorker : public Worker {
-  TestWorker() : Worker("test-worker", HAL_PRIORITY_URGENT_DISPLAY){};
+  TestWorker()
+      : Worker("test-worker", HAL_PRIORITY_URGENT_DISPLAY),
+        value(0),
+        enabled_(false) {
+  }
 
   int Init() {
     return InitWorker();
   }
 
-  void Routine() override {
+  void Routine() {
     Lock();
     if (!enabled_) {
       int ret = WaitForSignalOrExitLocked();
@@ -43,17 +47,16 @@ struct TestWorker : public Worker {
       Signal();
   }
 
-  // NOLINTNEXTLINE: should not be public
-  int value{};
+  int value;
 
  private:
-  bool enabled_{};
+  bool enabled_;
 };
 
 struct WorkerTest : public testing::Test {
   TestWorker worker;
 
-  void SetUp() override {
+  virtual void SetUp() {
     worker.Init();
   }
 
@@ -62,8 +65,7 @@ struct WorkerTest : public testing::Test {
   }
 };
 
-// NOLINTNEXTLINE: required by gtest macros
-TEST_F(WorkerTest, TestWorker) {
+TEST_F(WorkerTest, test_worker) {
   // already isInitialized so should succeed
   ASSERT_TRUE(worker.initialized());
 
@@ -100,8 +102,7 @@ TEST_F(WorkerTest, TestWorker) {
   ASSERT_FALSE(worker.initialized());
 }
 
-// NOLINTNEXTLINE: required by gtest macros
-TEST_F(WorkerTest, ExitWhileRunning) {
+TEST_F(WorkerTest, exit_while_running) {
   worker.Control(true);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));

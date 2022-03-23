@@ -14,22 +14,32 @@
  * limitations under the License.
  */
 
-#include "BackendClient.h"
+#include "BackendRCarDu.h"
 
 #include "BackendManager.h"
+#include "bufferinfo/BufferInfoGetter.h"
+#include "drm_fourcc.h"
 
 namespace android {
 
-HWC2::Error BackendClient::ValidateDisplay(DrmHwcTwo::HwcDisplay *display,
-                                           uint32_t *num_types,
-                                           uint32_t * /*num_requests*/) {
-  for (auto & [ layer_handle, layer ] : display->layers()) {
-    layer.set_validated_type(HWC2::Composition::Client);
-    ++*num_types;
-  }
-  return HWC2::Error::HasChanges;
+bool BackendRCarDu::IsClientLayer(DrmHwcTwo::HwcDisplay *display,
+                                  DrmHwcTwo::HwcLayer *layer) {
+  hwc_drm_bo_t bo;
+
+  int ret = BufferInfoGetter::GetInstance()->ConvertBoInfo(layer->buffer(),
+                                                           &bo);
+  if (ret)
+    return true;
+
+  if (bo.format == DRM_FORMAT_ABGR8888)
+    return true;
+
+  if (layer->RequireScalingOrPhasing())
+    return true;
+
+  return Backend::IsClientLayer(display, layer);
 }
 
-REGISTER_BACKEND("client", BackendClient);
+REGISTER_BACKEND("rcar-du", BackendRCarDu);
 
 }  // namespace android
