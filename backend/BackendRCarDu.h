@@ -14,22 +14,18 @@
  * limitations under the License.
  */
 
-#include "BackendClient.h"
+#ifndef HWC_DISPLAY_BACKEND_RCAR_DU_H
+#define HWC_DISPLAY_BACKEND_RCAR_DU_H
 
-#include "BackendManager.h"
+#include "Backend.h"
 
 namespace android {
 
-HWC2::Error BackendClient::ValidateDisplay(DrmHwcTwo::HwcDisplay *display,
-                                           uint32_t *num_types,
-                                           uint32_t * /*num_requests*/) {
-  for (auto & [ layer_handle, layer ] : display->layers()) {
-    layer.set_validated_type(HWC2::Composition::Client);
-    ++*num_types;
-  }
-  return HWC2::Error::HasChanges;
-}
-
-REGISTER_BACKEND("client", BackendClient);
-
+class BackendRCarDu : public Backend {
+ public:
+  bool IsClientLayer(DrmHwcTwo::HwcDisplay *display,
+                     DrmHwcTwo::HwcLayer *layer) override;
+};
 }  // namespace android
+
+#endif

@@ -22,27 +22,28 @@
 #include "BufferInfoMapperMetadata.h"
 #endif
 
+#include <cutils/properties.h>
+#include <gralloc_handle.h>
+#include <hardware/gralloc.h>
+#include <log/log.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
-
-#include "utils/log.h"
-#include "utils/properties.h"
 
 namespace android {
 
 BufferInfoGetter *BufferInfoGetter::GetInstance() {
   static std::unique_ptr<BufferInfoGetter> inst;
-  if (!inst) {
-#if PLATFORM_SDK_VERSION >= 30 && defined(USE_IMAPPER4_METADATA_API)
+  if (inst == nullptr) {
+#if PLATFORM_SDK_VERSION >= 30
     inst.reset(BufferInfoMapperMetadata::CreateInstance());
-    if (!inst) {
+    if (inst == nullptr) {
       ALOGW(
           "Generic buffer getter is not available. Falling back to legacy...");
+#endif
+      inst.reset(LegacyBufferInfoGetter::CreateInstance());
+#if PLATFORM_SDK_VERSION >= 30
     }
 #endif
-    if (!inst) {
-      inst = LegacyBufferInfoGetter::CreateInstance();
-    }
   }
 
   return inst.get();
@@ -52,21 +53,19 @@ bool BufferInfoGetter::IsHandleUsable(buffer_handle_t handle) {
   hwc_drm_bo_t bo;
   memset(&bo, 0, sizeof(hwc_drm_bo_t));
 
-  if (ConvertBoInfo(handle, &bo) != 0) {
+  if (ConvertBoInfo(handle, &bo) != 0)
     return false;
-  }
-  if (bo.prime_fds[0] == 0) {
+
+  if (bo.prime_fds[0] == 0)
     return false;
-  }
+
   return true;
 }
 
 int LegacyBufferInfoGetter::Init() {
-  int ret = hw_get_module(
-      GRALLOC_HARDWARE_MODULE_ID,
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-      reinterpret_cast<const hw_module_t **>(&gralloc_));
-  if (ret != 0) {
+  int ret = hw_get_module(GRALLOC_HARDWARE_MODULE_ID,
+                          (const hw_module_t **)&gralloc_);
+  if (ret) {
     ALOGE("Failed to open gralloc module");
     return ret;
   }
@@ -91,8 +90,6 @@ uint32_t LegacyBufferInfoGetter::ConvertHalFormatToDrm(uint32_t hal_format) {
       return DRM_FORMAT_BGR565;
     case HAL_PIXEL_FORMAT_YV12:
       return DRM_FORMAT_YVU420;
-    case HAL_PIXEL_FORMAT_RGBA_1010102:
-      return DRM_FORMAT_ABGR2101010;
     default:
       ALOGE("Cannot convert hal format to drm format %u", hal_format);
       return DRM_FORMAT_INVALID;
@@ -106,14 +103,13 @@ bool BufferInfoGetter::IsDrmFormatRgb(uint32_t drm_format) {
     case DRM_FORMAT_ABGR8888:
     case DRM_FORMAT_BGR888:
     case DRM_FORMAT_BGR565:
-    case DRM_FORMAT_ABGR2101010:
       return true;
     default:
       return false;
   }
 }
 
-__attribute__((weak)) std::unique_ptr<LegacyBufferInfoGetter>
+__attribute__((weak)) LegacyBufferInfoGetter *
 LegacyBufferInfoGetter::CreateInstance() {
   ALOGE("No legacy buffer info getters available");
   return nullptr;
