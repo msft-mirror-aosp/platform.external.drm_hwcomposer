@@ -38,8 +38,8 @@ cc_library_static {
     srcs: ["utils/Worker.cpp"],
 
     include_dirs: [
-        "external/drm_hwcomposer",
         "external/drm_hwcomposer/include",
+        "external/drm_hwcomposer",
     ],
 
     cflags: [
@@ -69,8 +69,8 @@ cc_defaults {
     ],
 
     include_dirs: [
-        "external/drm_hwcomposer",
         "external/drm_hwcomposer/include",
+        "external/drm_hwcomposer",
     ],
 
     static_libs: ["libdrmhwc_utils"],
@@ -81,9 +81,8 @@ cc_defaults {
     ],
 
     cppflags: [
-        "-DHWC2_INCLUDE_STRINGIFICATION",
         "-DHWC2_USE_CPP11",
-        "-std=c++17",
+        "-DHWC2_INCLUDE_STRINGIFICATION",
     ],
 
     product_variables: {
@@ -95,67 +94,54 @@ cc_defaults {
     relative_install_path: "hw",
     vendor: true,
 }
-
-filegroup {
-    name: "drm_hwcomposer_common",
+cc_library_static {
+    name: "drm_hwcomposer",
+    defaults: ["hwcomposer.drm_defaults"],
     srcs: [
+        "DrmHwcTwo.cpp",
+
         "bufferinfo/BufferInfoGetter.cpp",
         "bufferinfo/BufferInfoMapperMetadata.cpp",
 
-        "compositor/DrmKmsPlan.cpp",
+        "compositor/DrmDisplayComposition.cpp",
+        "compositor/DrmDisplayCompositor.cpp",
+        "compositor/Planner.cpp",
 
-        "drm/DrmAtomicStateManager.cpp",
         "drm/DrmConnector.cpp",
         "drm/DrmCrtc.cpp",
         "drm/DrmDevice.cpp",
-        "drm/DrmDisplayPipeline.cpp",
         "drm/DrmEncoder.cpp",
-        "drm/DrmFbImporter.cpp",
+        "drm/DrmEventListener.cpp",
+        "drm/DrmGenericImporter.cpp",
         "drm/DrmMode.cpp",
         "drm/DrmPlane.cpp",
         "drm/DrmProperty.cpp",
         "drm/ResourceManager.cpp",
-        "drm/UEventListener.cpp",
         "drm/VSyncWorker.cpp",
 
+        "utils/autolock.cpp",
         "utils/hwcutils.cpp",
 
+        "backend/BackendManager.cpp",
         "backend/Backend.cpp",
         "backend/BackendClient.cpp",
-        "backend/BackendManager.cpp",
-
-        "hwc2_device/DrmHwcTwo.cpp",
-        "hwc2_device/HwcDisplay.cpp",
-        "hwc2_device/HwcDisplayConfigs.cpp",
-        "hwc2_device/HwcLayer.cpp",
-        "hwc2_device/hwc2_device.cpp",
+        "backend/BackendRCarDu.cpp",
     ],
-}
-
-// Kept only for compatibility with older Android version. Please do not use!
-cc_library_static {
-    name: "drm_hwcomposer",
-    defaults: ["hwcomposer.drm_defaults"],
-    srcs: [":drm_hwcomposer_common"],
 }
 
 cc_library_shared {
     name: "hwcomposer.drm",
     defaults: ["hwcomposer.drm_defaults"],
-    srcs: [
-        ":drm_hwcomposer_common",
-        "bufferinfo/legacy/BufferInfoLibdrm.cpp",
-    ],
-    cflags: ["-DUSE_IMAPPER4_METADATA_API"],
+    whole_static_libs: ["drm_hwcomposer"],
+    srcs: ["bufferinfo/legacy/BufferInfoLibdrm.cpp"],
 }
 
 cc_library_shared {
     name: "hwcomposer.drm_minigbm",
     defaults: ["hwcomposer.drm_defaults"],
-    srcs: [
-        ":drm_hwcomposer_common",
-        "bufferinfo/legacy/BufferInfoMinigbm.cpp",
-    ],
+    whole_static_libs: ["drm_hwcomposer"],
+    srcs: ["bufferinfo/legacy/BufferInfoMinigbm.cpp"],
+    include_dirs: ["external/minigbm/cros_gralloc"],
 }
 
 // Used by hwcomposer.drm_imagination
