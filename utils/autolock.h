@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 The Android Open Source Project
+ * Copyright (C) 2015 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,22 +14,29 @@
  * limitations under the License.
  */
 
-#include "BackendClient.h"
-
-#include "BackendManager.h"
+#include <pthread.h>
 
 namespace android {
 
-HWC2::Error BackendClient::ValidateDisplay(DrmHwcTwo::HwcDisplay *display,
-                                           uint32_t *num_types,
-                                           uint32_t * /*num_requests*/) {
-  for (auto & [ layer_handle, layer ] : display->layers()) {
-    layer.set_validated_type(HWC2::Composition::Client);
-    ++*num_types;
+class AutoLock {
+ public:
+  AutoLock(pthread_mutex_t *mutex, const char *const name)
+      : mutex_(mutex), name_(name) {
   }
-  return HWC2::Error::HasChanges;
-}
+  ~AutoLock() {
+    if (locked_)
+      Unlock();
+  }
 
-REGISTER_BACKEND("client", BackendClient);
+  AutoLock(const AutoLock &rhs) = delete;
+  AutoLock &operator=(const AutoLock &rhs) = delete;
 
+  int Lock();
+  int Unlock();
+
+ private:
+  pthread_mutex_t *const mutex_;
+  bool locked_ = false;
+  const char *const name_;
+};
 }  // namespace android

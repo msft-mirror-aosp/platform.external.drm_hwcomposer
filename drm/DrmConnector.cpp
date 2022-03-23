@@ -18,174 +18,237 @@
 
 #include "DrmConnector.h"
 
+#include <errno.h>
+#include <log/log.h>
+#include <stdint.h>
 #include <xf86drmMode.h>
 
 #include <array>
-#include <cerrno>
-#include <cstdint>
 #include <sstream>
 
 #include "DrmDevice.h"
-#include "utils/log.h"
-
-#ifndef DRM_MODE_CONNECTOR_SPI
-// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define DRM_MODE_CONNECTOR_SPI 19
-#endif
-
-#ifndef DRM_MODE_CONNECTOR_USB
-// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define DRM_MODE_CONNECTOR_USB 20
-#endif
 
 namespace android {
 
-constexpr size_t kTypesCount = 21;
+constexpr size_t TYPES_COUNT = 17;
 
-static bool GetOptionalConnectorProperty(const DrmDevice &dev,
-                                         const DrmConnector &connector,
-                                         const char *prop_name,
-                                         DrmProperty *property) {
-  return dev.GetProperty(connector.GetId(), DRM_MODE_OBJECT_CONNECTOR,
-                         prop_name, property) == 0;
+DrmConnector::DrmConnector(DrmDevice *drm, drmModeConnectorPtr c,
+                           DrmEncoder *current_encoder,
+                           std::vector<DrmEncoder *> &possible_encoders)
+    : drm_(drm),
+      id_(c->connector_id),
+      encoder_(current_encoder),
+      display_(-1),
+      type_(c->connector_type),
+      type_id_(c->connector_type_id),
+      state_(c->connection),
+      mm_width_(c->mmWidth),
+      mm_height_(c->mmHeight),
+      possible_encoders_(possible_encoders) {
 }
 
-static bool GetConnectorProperty(const DrmDevice &dev,
-                                 const DrmConnector &connector,
-                                 const char *prop_name, DrmProperty *property) {
-  if (!GetOptionalConnectorProperty(dev, connector, prop_name, property)) {
-    ALOGE("Could not get %s property\n", prop_name);
-    return false;
+int DrmConnector::Init() {
+  int ret = drm_->GetConnectorProperty(*this, "DPMS", &dpms_property_);
+  if (ret) {
+    ALOGE("Could not get DPMS property\n");
+    return ret;
   }
-  return true;
-}
-
-auto DrmConnector::CreateInstance(DrmDevice &dev, uint32_t connector_id,
-                                  uint32_t index)
-    -> std::unique_ptr<DrmConnector> {
-  auto conn = MakeDrmModeConnectorUnique(dev.GetFd(), connector_id);
-  if (!conn) {
-    ALOGE("Failed to get connector %d", connector_id);
-    return {};
+  ret = drm_->GetConnectorProperty(*this, "CRTC_ID", &crtc_id_property_);
+  if (ret) {
+    ALOGE("Could not get CRTC_ID property\n");
+    return ret;
   }
-
-  auto c = std::unique_ptr<DrmConnector>(
-      new DrmConnector(std::move(conn), &dev, index));
-
-  if (!GetConnectorProperty(dev, *c, "DPMS", &c->dpms_property_) ||
-      !GetConnectorProperty(dev, *c, "CRTC_ID", &c->crtc_id_property_)) {
-    return {};
+  ret = UpdateEdidProperty();
+  if (writeback()) {
+    ret = drm_->GetConnectorProperty(*this, "WRITEBACK_PIXEL_FORMATS",
+                                     &writeback_pixel_formats_);
+    if (ret) {
+      ALOGE("Could not get WRITEBACK_PIXEL_FORMATS connector_id = %d\n", id_);
+      return ret;
+    }
+    ret = drm_->GetConnectorProperty(*this, "WRITEBACK_FB_ID",
+                                     &writeback_fb_id_);
+    if (ret) {
+      ALOGE("Could not get WRITEBACK_FB_ID connector_id = %d\n", id_);
+      return ret;
+    }
+    ret = drm_->GetConnectorProperty(*this, "WRITEBACK_OUT_FENCE_PTR",
+                                     &writeback_out_fence_);
+    if (ret) {
+      ALOGE("Could not get WRITEBACK_OUT_FENCE_PTR connector_id = %d\n", id_);
+      return ret;
+    }
   }
-
-  c->UpdateEdidProperty();
-
-  if (c->IsWriteback() &&
-      (!GetConnectorProperty(dev, *c, "WRITEBACK_PIXEL_FORMATS",
-                             &c->writeback_pixel_formats_) ||
-       !GetConnectorProperty(dev, *c, "WRITEBACK_FB_ID",
-                             &c->writeback_fb_id_) ||
-       !GetConnectorProperty(dev, *c, "WRITEBACK_OUT_FENCE_PTR",
-                             &c->writeback_out_fence_))) {
-    return {};
-  }
-
-  return c;
+  return 0;
 }
 
 int DrmConnector::UpdateEdidProperty() {
-  return GetOptionalConnectorProperty(*drm_, *this, "EDID", &edid_property_)
-             ? 0
-             : -EINVAL;
+  int ret = drm_->GetConnectorProperty(*this, "EDID", &edid_property_);
+  if (ret) {
+    ALOGW("Could not get EDID property\n");
+  }
+  return ret;
 }
 
-auto DrmConnector::GetEdidBlob() -> DrmModePropertyBlobUnique {
-  uint64_t blob_id = 0;
+int DrmConnector::GetEdidBlob(drmModePropertyBlobPtr &blob) {
+  uint64_t blob_id;
   int ret = UpdateEdidProperty();
-  if (ret != 0) {
-    return {};
+  if (ret) {
+    return ret;
   }
 
-  std::tie(ret, blob_id) = GetEdidProperty().value();
-  if (ret != 0) {
-    return {};
+  std::tie(ret, blob_id) = edid_property().value();
+  if (ret) {
+    return ret;
   }
 
-  return MakeDrmModePropertyBlobUnique(drm_->GetFd(), blob_id);
+  blob = drmModeGetPropertyBlob(drm_->fd(), blob_id);
+  return !blob;
 }
 
-bool DrmConnector::IsInternal() const {
-  auto type = connector_->connector_type;
-  return type == DRM_MODE_CONNECTOR_LVDS || type == DRM_MODE_CONNECTOR_eDP ||
-         type == DRM_MODE_CONNECTOR_DSI || type == DRM_MODE_CONNECTOR_VIRTUAL ||
-         type == DRM_MODE_CONNECTOR_DPI || type == DRM_MODE_CONNECTOR_SPI;
+uint32_t DrmConnector::id() const {
+  return id_;
 }
 
-bool DrmConnector::IsExternal() const {
-  auto type = connector_->connector_type;
-  return type == DRM_MODE_CONNECTOR_HDMIA ||
-         type == DRM_MODE_CONNECTOR_DisplayPort ||
-         type == DRM_MODE_CONNECTOR_DVID || type == DRM_MODE_CONNECTOR_DVII ||
-         type == DRM_MODE_CONNECTOR_VGA || type == DRM_MODE_CONNECTOR_USB;
+int DrmConnector::display() const {
+  return display_;
 }
 
-bool DrmConnector::IsWriteback() const {
+void DrmConnector::set_display(int display) {
+  display_ = display;
+}
+
+bool DrmConnector::internal() const {
+  return type_ == DRM_MODE_CONNECTOR_LVDS || type_ == DRM_MODE_CONNECTOR_eDP ||
+         type_ == DRM_MODE_CONNECTOR_DSI ||
+         type_ == DRM_MODE_CONNECTOR_VIRTUAL || type_ == DRM_MODE_CONNECTOR_DPI;
+}
+
+bool DrmConnector::external() const {
+  return type_ == DRM_MODE_CONNECTOR_HDMIA ||
+         type_ == DRM_MODE_CONNECTOR_DisplayPort ||
+         type_ == DRM_MODE_CONNECTOR_DVID || type_ == DRM_MODE_CONNECTOR_DVII ||
+         type_ == DRM_MODE_CONNECTOR_VGA;
+}
+
+bool DrmConnector::writeback() const {
 #ifdef DRM_MODE_CONNECTOR_WRITEBACK
-  return connector_->connector_type == DRM_MODE_CONNECTOR_WRITEBACK;
+  return type_ == DRM_MODE_CONNECTOR_WRITEBACK;
 #else
   return false;
 #endif
 }
 
-bool DrmConnector::IsValid() const {
-  return IsInternal() || IsExternal() || IsWriteback();
+bool DrmConnector::valid_type() const {
+  return internal() || external() || writeback();
 }
 
-std::string DrmConnector::GetName() const {
-  constexpr std::array<const char *, kTypesCount> kNames =
-      {"None",      "VGA",  "DVI-I",     "DVI-D",   "DVI-A", "Composite",
-       "SVIDEO",    "LVDS", "Component", "DIN",     "DP",    "HDMI-A",
-       "HDMI-B",    "TV",   "eDP",       "Virtual", "DSI",   "DPI",
-       "Writeback", "SPI",  "USB"};
+std::string DrmConnector::name() const {
+  constexpr std::array<const char *, TYPES_COUNT> names =
+      {"None",   "VGA",  "DVI-I",     "DVI-D",   "DVI-A", "Composite",
+       "SVIDEO", "LVDS", "Component", "DIN",     "DP",    "HDMI-A",
+       "HDMI-B", "TV",   "eDP",       "Virtual", "DSI"};
 
-  if (connector_->connector_type < kTypesCount) {
+  if (type_ < TYPES_COUNT) {
     std::ostringstream name_buf;
-    name_buf << kNames[connector_->connector_type] << "-"
-             << connector_->connector_type_id;
+    name_buf << names[type_] << "-" << type_id_;
     return name_buf.str();
+  } else {
+    ALOGE("Unknown type in connector %d, could not make his name", id_);
+    return "None";
   }
-
-  ALOGE("Unknown type in connector %d, could not make his name", GetId());
-  return "None";
 }
 
 int DrmConnector::UpdateModes() {
-  auto conn = MakeDrmModeConnectorUnique(drm_->GetFd(), GetId());
-  if (!conn) {
-    ALOGE("Failed to get connector %d", GetId());
+  int fd = drm_->fd();
+
+  drmModeConnectorPtr c = drmModeGetConnector(fd, id_);
+  if (!c) {
+    ALOGE("Failed to get connector %d", id_);
     return -ENODEV;
   }
-  connector_ = std::move(conn);
 
-  modes_.clear();
-  for (int i = 0; i < connector_->count_modes; ++i) {
+  state_ = c->connection;
+
+  bool preferred_mode_found = false;
+  std::vector<DrmMode> new_modes;
+  for (int i = 0; i < c->count_modes; ++i) {
     bool exists = false;
     for (const DrmMode &mode : modes_) {
-      if (mode == connector_->modes[i]) {
+      if (mode == c->modes[i]) {
+        new_modes.push_back(mode);
         exists = true;
         break;
       }
     }
-
     if (!exists) {
-      modes_.emplace_back(DrmMode(&connector_->modes[i]));
+      DrmMode m(&c->modes[i]);
+      m.set_id(drm_->next_mode_id());
+      new_modes.push_back(m);
+    }
+    // Use only the first DRM_MODE_TYPE_PREFERRED mode found
+    if (!preferred_mode_found &&
+        (new_modes.back().type() & DRM_MODE_TYPE_PREFERRED)) {
+      preferred_mode_id_ = new_modes.back().id();
+      preferred_mode_found = true;
     }
   }
-
+  modes_.swap(new_modes);
+  if (!preferred_mode_found && modes_.size() != 0) {
+    preferred_mode_id_ = modes_[0].id();
+  }
   return 0;
 }
 
-void DrmConnector::SetActiveMode(DrmMode &mode) {
+const DrmMode &DrmConnector::active_mode() const {
+  return active_mode_;
+}
+
+void DrmConnector::set_active_mode(const DrmMode &mode) {
   active_mode_ = mode;
 }
 
+const DrmProperty &DrmConnector::dpms_property() const {
+  return dpms_property_;
+}
+
+const DrmProperty &DrmConnector::crtc_id_property() const {
+  return crtc_id_property_;
+}
+
+const DrmProperty &DrmConnector::edid_property() const {
+  return edid_property_;
+}
+
+const DrmProperty &DrmConnector::writeback_pixel_formats() const {
+  return writeback_pixel_formats_;
+}
+
+const DrmProperty &DrmConnector::writeback_fb_id() const {
+  return writeback_fb_id_;
+}
+
+const DrmProperty &DrmConnector::writeback_out_fence() const {
+  return writeback_out_fence_;
+}
+
+DrmEncoder *DrmConnector::encoder() const {
+  return encoder_;
+}
+
+void DrmConnector::set_encoder(DrmEncoder *encoder) {
+  encoder_ = encoder;
+}
+
+drmModeConnection DrmConnector::state() const {
+  return state_;
+}
+
+uint32_t DrmConnector::mm_width() const {
+  return mm_width_;
+}
+
+uint32_t DrmConnector::mm_height() const {
+  return mm_height_;
+}
 }  // namespace android
