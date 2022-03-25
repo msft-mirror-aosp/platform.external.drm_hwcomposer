@@ -1,4 +1,23 @@
+cc_library_shared {
+    name: "hwcomposer.filegroups_build_test",
+    defaults: ["hwcomposer.drm_defaults"],
 
+    srcs: [
+        ":drm_hwcomposer_common",
+        ":drm_hwcomposer_platformhisi",
+        ":drm_hwcomposer_platformimagination",
+        ":drm_hwcomposer_platformmediatek",
+        ":drm_hwcomposer_platformmeson",
+    ],
+
+    local_include_dirs: [
+        "test_include",
+    ],
+
+    cppflags: [
+        "-DDISABLE_LEGACY_GETTERS",
+    ],
+}
 
 package {
     // See: http://go/android-license-faq
@@ -19,7 +38,21 @@ cc_test {
     static_libs: ["libdrmhwc_utils"],
     shared_libs: ["hwcomposer.drm"],
     include_dirs: [
+        "external/drm_hwcomposer",
         "external/drm_hwcomposer/include",
+    ],
+}
+
+// Tool for listening and dumping uevents
+cc_test {
+    name: "hwc-drm-uevent-print",
+
+    srcs: ["uevent_print.cpp"],
+
+    vendor: true,
+    header_libs: ["libhardware_headers"],
+    shared_libs: ["liblog"],
+    include_dirs: [
         "external/drm_hwcomposer",
     ],
 }
