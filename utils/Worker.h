@@ -17,9 +17,10 @@
 #ifndef ANDROID_WORKER_H_
 #define ANDROID_WORKER_H_
 
+#include <stdint.h>
+#include <stdlib.h>
+
 #include <condition_variable>
-#include <cstdint>
-#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <thread>
