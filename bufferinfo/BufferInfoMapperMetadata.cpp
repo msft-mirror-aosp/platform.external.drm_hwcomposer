@@ -21,13 +21,13 @@
 #include "BufferInfoMapperMetadata.h"
 
 #include <drm/drm_fourcc.h>
-#include <inttypes.h>
-#include <log/log.h>
 #include <ui/GraphicBufferMapper.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
-using android::hardware::graphics::common::V1_1::BufferUsage;
+#include <cinttypes>
+
+#include "utils/log.h"
 
 namespace android {
 
@@ -46,99 +46,103 @@ BufferInfoGetter *BufferInfoMapperMetadata::CreateInstance() {
  * so that it can be overridden.
  */
 int __attribute__((weak))
-BufferInfoMapperMetadata::GetFds(buffer_handle_t handle, hwc_drm_bo_t *bo) {
-  int num_fds = handle->numFds;
+BufferInfoMapperMetadata::GetFds(buffer_handle_t handle, BufferInfo *bo) {
+  int fd_index = 0;
 
-  if (num_fds >= 1 && num_fds <= 2) {
-    if (IsDrmFormatRgb(bo->format)) {
-      bo->prime_fds[0] = handle->data[0];
-    } else {
-      bo->prime_fds[0] = bo->prime_fds[1] = bo->prime_fds[2] = handle->data[0];
-    }
-    if (bo->prime_fds[0] <= 0) {
-      ALOGE("Encountered invalid fd %d", bo->prime_fds[0]);
-      return android::BAD_VALUE;
+  if (handle->numFds <= 0) {
+    ALOGE("Handle has no fds");
+    return android::BAD_VALUE;
+  }
+
+  for (int i = 0; i < kBufferMaxPlanes; i++) {
+    /* If no size, we're out of usable planes */
+    if (bo->sizes[i] <= 0) {
+      if (i == 0) {
+        ALOGE("Bad handle metadata");
+        return android::BAD_VALUE;
+      }
+      break;
     }
 
-  } else if (num_fds >= 3) {
-    bo->prime_fds[0] = handle->data[0];
-    bo->prime_fds[1] = handle->data[1];
-    bo->prime_fds[2] = handle->data[2];
-    for (int i = 0; i < 3; i++) {
-      if (bo->prime_fds[i] <= 0) {
-        ALOGE("Encountered invalid fd %d", bo->prime_fds[i]);
+    /*
+     * If the offset is zero, its multi-buffer
+     * so move to the next fd
+     */
+    if (i != 0 && bo->offsets[i] == 0) {
+      fd_index++;
+      if (fd_index >= handle->numFds) {
+        ALOGE("Handle has no more fds");
         return android::BAD_VALUE;
       }
     }
+
+    bo->prime_fds[i] = handle->data[fd_index];
+    if (bo->prime_fds[i] <= 0) {
+      ALOGE("Invalid prime fd");
+      return android::BAD_VALUE;
+    }
   }
+
   return 0;
 }
 
-int BufferInfoMapperMetadata::ConvertBoInfo(buffer_handle_t handle,
-                                            hwc_drm_bo_t *bo) {
+auto BufferInfoMapperMetadata::GetBoInfo(buffer_handle_t handle)
+    -> std::optional<BufferInfo> {
   GraphicBufferMapper &mapper = GraphicBufferMapper::getInstance();
-  if (!handle)
-    return -EINVAL;
+  if (handle == nullptr)
+    return {};
 
-  uint64_t usage = 0;
-  int err = mapper.getUsage(handle, &usage);
-  if (err) {
-    ALOGE("Failed to get usage err=%d", err);
-    return err;
-  }
-  bo->usage = static_cast<uint32_t>(usage);
+  BufferInfo bi{};
 
-  ui::PixelFormat hal_format;
-  err = mapper.getPixelFormatRequested(handle, &hal_format);
-  if (err) {
-    ALOGE("Failed to get HAL Pixel Format err=%d", err);
-    return err;
-  }
-  bo->hal_format = static_cast<uint32_t>(hal_format);
-
-  err = mapper.getPixelFormatFourCC(handle, &bo->format);
-  if (err) {
+  int err = mapper.getPixelFormatFourCC(handle, &bi.format);
+  if (err != 0) {
     ALOGE("Failed to get FourCC format err=%d", err);
-    return err;
+    return {};
   }
 
-  err = mapper.getPixelFormatModifier(handle, &bo->modifiers[0]);
-  if (err) {
+  err = mapper.getPixelFormatModifier(handle, &bi.modifiers[0]);
+  if (err != 0) {
     ALOGE("Failed to get DRM Modifier err=%d", err);
-    return err;
+    return {};
   }
-  bo->with_modifiers = true;
 
   uint64_t width = 0;
   err = mapper.getWidth(handle, &width);
-  if (err) {
+  if (err != 0) {
     ALOGE("Failed to get Width err=%d", err);
-    return err;
+    return {};
   }
-  bo->width = static_cast<uint32_t>(width);
+  bi.width = static_cast<uint32_t>(width);
 
   uint64_t height = 0;
   err = mapper.getHeight(handle, &height);
-  if (err) {
+  if (err != 0) {
     ALOGE("Failed to get Height err=%d", err);
-    return err;
+    return {};
   }
-  bo->height = static_cast<uint32_t>(height);
+  bi.height = static_cast<uint32_t>(height);
 
   std::vector<ui::PlaneLayout> layouts;
   err = mapper.getPlaneLayouts(handle, &layouts);
-  if (err) {
+  if (err != 0) {
     ALOGE("Failed to get Plane Layouts err=%d", err);
-    return err;
+    return {};
   }
 
   for (uint32_t i = 0; i < layouts.size(); i++) {
-    bo->modifiers[i] = bo->modifiers[0];
-    bo->pitches[i] = layouts[i].strideInBytes;
-    bo->offsets[i] = layouts[i].offsetInBytes;
+    bi.modifiers[i] = bi.modifiers[0];
+    bi.pitches[i] = layouts[i].strideInBytes;
+    bi.offsets[i] = layouts[i].offsetInBytes;
+    bi.sizes[i] = layouts[i].totalSizeInBytes;
   }
 
-  return GetFds(handle, bo);
+  err = GetFds(handle, &bi);
+  if (err != 0) {
+    ALOGE("Failed to get fds (err=%d)", err);
+    return {};
+  }
+
+  return bi;
 }
 
 }  // namespace android

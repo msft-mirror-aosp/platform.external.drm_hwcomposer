@@ -22,50 +22,57 @@
 #include "BufferInfoMapperMetadata.h"
 #endif
 
-#include <cutils/properties.h>
-#include <gralloc_handle.h>
-#include <hardware/gralloc.h>
-#include <log/log.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+
+#include <mutex>
+
+#include "utils/log.h"
+#include "utils/properties.h"
 
 namespace android {
 
 BufferInfoGetter *BufferInfoGetter::GetInstance() {
   static std::unique_ptr<BufferInfoGetter> inst;
-  if (inst == nullptr) {
-#if PLATFORM_SDK_VERSION >= 30
+  if (!inst) {
+#if PLATFORM_SDK_VERSION >= 30 && defined(USE_IMAPPER4_METADATA_API)
     inst.reset(BufferInfoMapperMetadata::CreateInstance());
-    if (inst == nullptr) {
+    if (!inst) {
       ALOGW(
           "Generic buffer getter is not available. Falling back to legacy...");
-#endif
-      inst.reset(LegacyBufferInfoGetter::CreateInstance());
-#if PLATFORM_SDK_VERSION >= 30
     }
 #endif
+    if (!inst) {
+      inst = LegacyBufferInfoGetter::CreateInstance();
+    }
   }
 
   return inst.get();
 }
 
-bool BufferInfoGetter::IsHandleUsable(buffer_handle_t handle) {
-  hwc_drm_bo_t bo;
-  memset(&bo, 0, sizeof(hwc_drm_bo_t));
+std::optional<BufferUniqueId> BufferInfoGetter::GetUniqueId(
+    buffer_handle_t handle) {
+  struct stat sb {};
+  if (fstat(handle->data[0], &sb) != 0) {
+    return {};
+  }
 
-  if (ConvertBoInfo(handle, &bo) != 0)
-    return false;
+  if (sb.st_size == 0) {
+    return {};
+  }
 
-  if (bo.prime_fds[0] == 0)
-    return false;
-
-  return true;
+  return static_cast<BufferUniqueId>(sb.st_ino);
 }
 
 int LegacyBufferInfoGetter::Init() {
-  int ret = hw_get_module(GRALLOC_HARDWARE_MODULE_ID,
-                          (const hw_module_t **)&gralloc_);
-  if (ret) {
+  int ret = hw_get_module(
+      GRALLOC_HARDWARE_MODULE_ID,
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+      reinterpret_cast<const hw_module_t **>(&gralloc_));
+  if (ret != 0) {
     ALOGE("Failed to open gralloc module");
     return ret;
   }
@@ -90,6 +97,8 @@ uint32_t LegacyBufferInfoGetter::ConvertHalFormatToDrm(uint32_t hal_format) {
       return DRM_FORMAT_BGR565;
     case HAL_PIXEL_FORMAT_YV12:
       return DRM_FORMAT_YVU420;
+    case HAL_PIXEL_FORMAT_RGBA_1010102:
+      return DRM_FORMAT_ABGR2101010;
     default:
       ALOGE("Cannot convert hal format to drm format %u", hal_format);
       return DRM_FORMAT_INVALID;
@@ -103,13 +112,14 @@ bool BufferInfoGetter::IsDrmFormatRgb(uint32_t drm_format) {
     case DRM_FORMAT_ABGR8888:
     case DRM_FORMAT_BGR888:
     case DRM_FORMAT_BGR565:
+    case DRM_FORMAT_ABGR2101010:
       return true;
     default:
       return false;
   }
 }
 
-__attribute__((weak)) LegacyBufferInfoGetter *
+__attribute__((weak)) std::unique_ptr<LegacyBufferInfoGetter>
 LegacyBufferInfoGetter::CreateInstance() {
   ALOGE("No legacy buffer info getters available");
   return nullptr;
