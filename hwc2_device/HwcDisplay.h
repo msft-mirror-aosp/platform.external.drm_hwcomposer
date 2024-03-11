@@ -37,6 +37,7 @@ class DrmHwcTwo;
 
 inline constexpr uint32_t kPrimaryDisplay = 0;
 
+// NOLINTNEXTLINE
 class HwcDisplay {
  public:
   HwcDisplay(hwc2_display_t handle, HWC2::DisplayType type, DrmHwcTwo *hwc2);
@@ -44,7 +45,7 @@ class HwcDisplay {
   ~HwcDisplay();
 
   /* SetPipeline should be carefully used only by DrmHwcTwo hotplug handlers */
-  void SetPipeline(DrmDisplayPipeline *pipeline);
+  void SetPipeline(std::shared_ptr<DrmDisplayPipeline> pipeline);
 
   HWC2::Error CreateComposition(AtomicCommitArgs &a_args);
   std::vector<HwcLayer *> GetOrderLayersByZPos();
@@ -182,6 +183,15 @@ class HwcDisplay {
     return flatcon_;
   }
 
+  auto &GetWritebackLayer() {
+    return writeback_layer_;
+  }
+
+  void SetVirtualDisplayResolution(uint16_t width, uint16_t height) {
+    virtual_disp_width_ = width;
+    virtual_disp_height_ = height;
+  }
+
  private:
   HwcDisplayConfigs configs_;
 
@@ -193,7 +203,7 @@ class HwcDisplay {
   int64_t staged_mode_change_time_{};
   uint32_t staged_mode_config_id_{};
 
-  DrmDisplayPipeline *pipeline_{};
+  std::shared_ptr<DrmDisplayPipeline> pipeline_;
 
   std::unique_ptr<Backend> backend_;
   std::shared_ptr<FlatteningController> flatcon_;
@@ -210,6 +220,9 @@ class HwcDisplay {
 
   std::map<hwc2_layer_t, HwcLayer> layers_;
   HwcLayer client_layer_;
+  std::unique_ptr<HwcLayer> writeback_layer_;
+  uint16_t virtual_disp_width_{};
+  uint16_t virtual_disp_height_{};
   int32_t color_mode_{};
   static constexpr int kCtmRows = 3;
   static constexpr int kCtmCols = 3;
