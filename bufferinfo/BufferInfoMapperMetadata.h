@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-#ifndef PLATFORMIMAGINATION_H
-#define PLATFORMIMAGINATION_H
+#pragma once
 
 #include "bufferinfo/BufferInfoGetter.h"
 
@@ -27,10 +26,8 @@ class BufferInfoMapperMetadata : public BufferInfoGetter {
 
   auto GetBoInfo(buffer_handle_t handle) -> std::optional<BufferInfo> override;
 
-  int GetFds(buffer_handle_t handle, BufferInfo *bo);
+  static int GetFds(buffer_handle_t handle, BufferInfo *bo);
 
   static BufferInfoGetter *CreateInstance();
 };
 }  // namespace android
-
-#endif  // PLATFORMIMAGINATION_H
