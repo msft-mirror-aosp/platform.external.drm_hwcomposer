@@ -1,18 +1,24 @@
 
-INCLUDE_DIRS := . ../libdrm/include/drm include ./.ci/android_headers ./tests/test_include
+BASE_DIR:=../aospless
+
 SYSTEM_INCLUDE_DIRS := /usr/include/libdrm
 
-CLANG := clang++-14
-CLANG_TIDY := clang-tidy-14
+CLANG := clang++-15
+CLANG_TIDY := clang-tidy-15
 OUT_DIR := /tmp/drm_hwcomposer/build
 SRC_DIR := .
 
-CXXFLAGS := -fPIC -Wall -Wextra -Werror -DPLATFORM_SDK_VERSION=31 -D__ANDROID_API__=31
+CXXFLAGS := -Wall -Wextra -Werror
 CXXFLAGS += -D_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS
 CXXFLAGS += -fvisibility-inlines-hidden -std=gnu++17 -DHWC2_USE_CPP11 -DHWC2_INCLUDE_STRINGIFICATION -fno-rtti
 
-SKIP_FILES := \
-    bufferinfo/BufferInfoMapperMetadata.cpp
+CXXARGS := $(shell cat $(BASE_DIR)/build_flags/sharedlib.cppflags)
+CXXARGS := $(subst [BASE_DIR],$(BASE_DIR),$(CXXARGS))
+# clang-tidy doesn't like -mcpu=xxx flag
+CXXARGS := $(patsubst -mcpu=%,,$(CXXARGS))
+# TODO: build aospless with gtest enabled and remove line below
+CXXARGS := $(subst -nostdlibinc,,$(CXXARGS))
+CXXARGS += -I. -I./tests/test_include $(CXXFLAGS)
 
 TIDY_FILES_OVERRIDE := \
     bufferinfo/legacy/BufferInfoImagination.cpp:COARSE  \
@@ -22,18 +28,11 @@ TIDY_FILES_OVERRIDE := \
     bufferinfo/legacy/BufferInfoMaliMeson.cpp:COARSE    \
     bufferinfo/legacy/BufferInfoMinigbm.cpp:COARSE      \
     drm/DrmFbImporter.h:FINE                            \
-    drm/DrmMode.h:COARSE                                \
-    drm/DrmProperty.h:COARSE                            \
     drm/DrmUnique.h:FINE                                \
-    drm/DrmProperty.cpp:COARSE                          \
-    drm/VSyncWorker.cpp:COARSE                          \
     hwc2_device/DrmHwcTwo.cpp:COARSE                    \
     hwc2_device/DrmHwcTwo.h:COARSE                      \
     hwc2_device/HwcDisplay.cpp:COARSE                   \
     hwc2_device/HwcDisplay.h:COARSE                     \
-    tests/worker_test.cpp:COARSE                        \
-    utils/Worker.h:COARSE                               \
-    utils/UniqueFd.h:FINE                               \
     utils/log.h:FINE                                    \
     utils/properties.h:FINE                             \
 
@@ -97,15 +96,14 @@ DEPS := $(patsubst %.cpp,$(OUT_DIR)/%.d,$(BUILD_FILES))
 
 build: $(OBJ)
 
-CXXARGS := $(foreach dir,$(INCLUDE_DIRS),-I$(SRC_DIR)/$(dir)) $(foreach dir,$(SYSTEM_INCLUDE_DIRS),-I$(dir)) $(CXXFLAGS)
-
 $(OUT_DIR)/%.o: $(SRC_DIR)/%.cpp
-	mkdir -p $(dir $@)
-	$(CLANG) $< $(CXXARGS) -c -o $@
+	@mkdir -p $(dir $@)
+	@echo "CC $<"
+	@$(CLANG) $< $(CXXARGS) -c -o $@
 
 $(OUT_DIR)/%.d: $(SRC_DIR)/%.cpp
-	mkdir -p $(dir $@)
-	$(CLANG) $(CXXARGS) $< -MM -MT $(OUT_DIR)/$(patsubst %.cpp,%.o,$<) -o $@
+	@mkdir -p $(dir $@)
+	@$(CLANG) $(CXXARGS) $< -MM -MT $(OUT_DIR)/$(patsubst %.cpp,%.o,$<) -o $@
 
 # TIDY
 TIDY_FILES_AUTO := $(shell find -L $(SRC_DIR) -not -path '*/\.*' -not -path '*/tests/test_include/*' \( -path '*.cpp' -o -path '*.h' \))
@@ -130,7 +128,7 @@ TIDY_ARGS_COARSE := --checks="$(subst $(space),$(comma),$(strip $(TIDY_CHECKS_CO
 define process-tidy
 
 _TARG := $(OUT_DIR)/$1.tidy.ts
-_DEP := $(SRC_DIR)/$1
+_DEP := $1
 
 TIDY_DEPS += $(_TARG)
 
@@ -144,9 +142,10 @@ $$(_TARG): _DEP := $$(_DEP)
 $$(_TARG): _TARG := $$(_TARG)
 $$(_TARG): TIDY_ARGS := $$(TIDY_ARGS)
 $$(_TARG): $$(_DEP)
-	mkdir -p $$(dir $$(_TARG))
-	$$(CLANG_TIDY) $$(_DEP) $$(TIDY_ARGS) -- -x c++ $$(CXXARGS) -Wno-pragma-once-outside-header
-	touch $$(_TARG)
+	@mkdir -p $$(dir $$(_TARG))
+	@echo "TIDY $$<"
+	@$$(CLANG_TIDY) $$(_DEP) $$(TIDY_ARGS) --quiet -- -x c++ $$(CXXARGS) -Wno-pragma-once-outside-header
+	@touch $$(_TARG)
 
 endef
 

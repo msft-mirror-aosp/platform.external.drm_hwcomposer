@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-#ifndef ANDROID_DRM_H_
-#define ANDROID_DRM_H_
+#pragma once
 
 #include <cstdint>
 #include <map>
@@ -24,8 +23,7 @@
 #include "DrmConnector.h"
 #include "DrmCrtc.h"
 #include "DrmEncoder.h"
-#include "DrmFbImporter.h"
-#include "utils/UniqueFd.h"
+#include "utils/fd.h"
 
 namespace android {
 
@@ -40,8 +38,8 @@ class DrmDevice {
   static auto CreateInstance(std::string const &path, ResourceManager *res_man)
       -> std::unique_ptr<DrmDevice>;
 
-  auto GetFd() const {
-    return fd_.Get();
+  auto &GetFd() const {
+    return fd_;
   }
 
   auto &GetResMan() {
@@ -49,6 +47,8 @@ class DrmDevice {
   }
 
   auto GetConnectors() -> const std::vector<std::unique_ptr<DrmConnector>> &;
+  auto GetWritebackConnectors()
+      -> const std::vector<std::unique_ptr<DrmConnector>> &;
   auto GetPlanes() -> const std::vector<std::unique_ptr<DrmPlane>> &;
   auto GetCrtcs() -> const std::vector<std::unique_ptr<DrmCrtc>> &;
   auto GetEncoders() -> const std::vector<std::unique_ptr<DrmEncoder>> &;
@@ -103,7 +103,7 @@ class DrmDevice {
 
   static auto IsKMSDev(const char *path) -> bool;
 
-  UniqueFd fd_;
+  SharedFd fd_;
 
   std::vector<std::unique_ptr<DrmConnector>> connectors_;
   std::vector<std::unique_ptr<DrmConnector>> writeback_connectors_;
@@ -121,5 +121,3 @@ class DrmDevice {
   ResourceManager *const res_man_;
 };
 }  // namespace android
-
-#endif  // ANDROID_DRM_H_

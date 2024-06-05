@@ -35,13 +35,13 @@ void DrmHwcTwo::FinalizeDisplayBinding() {
     displays_[kPrimaryDisplay] = std::make_unique<
         HwcDisplay>(kPrimaryDisplay, HWC2::DisplayType::Physical, this);
     /* Initializes null-display */
-    displays_[kPrimaryDisplay]->SetPipeline(nullptr);
+    displays_[kPrimaryDisplay]->SetPipeline({});
   }
 
   if (displays_[kPrimaryDisplay]->IsInHeadlessMode() &&
       !display_handles_.empty()) {
     /* Reattach first secondary display to take place of the primary */
-    auto *pipe = display_handles_.begin()->first;
+    auto pipe = display_handles_.begin()->first;
     ALOGI("Primary display was disconnected, reattaching '%s' as new primary",
           pipe->connector->Get()->GetName().c_str());
     UnbindDisplay(pipe);
@@ -61,22 +61,15 @@ void DrmHwcTwo::FinalizeDisplayBinding() {
   const int kTimeForSFToDisposeDisplayUs = 200000;
   usleep(kTimeForSFToDisposeDisplayUs);
   mutex.lock();
-  std::vector<std::unique_ptr<HwcDisplay>> for_disposal;
   for (auto handle : displays_for_removal_list_) {
-    for_disposal.emplace_back(
-        std::unique_ptr<HwcDisplay>(displays_[handle].release()));
     displays_.erase(handle);
   }
-  /* Destroy HwcDisplays while unlocked to avoid vsyncworker deadlocks */
-  mutex.unlock();
-  for_disposal.clear();
-  mutex.lock();
 }
 
-bool DrmHwcTwo::BindDisplay(DrmDisplayPipeline *pipeline) {
+bool DrmHwcTwo::BindDisplay(std::shared_ptr<DrmDisplayPipeline> pipeline) {
   if (display_handles_.count(pipeline) != 0) {
     ALOGE("%s, pipeline is already used by another display, FIXME!!!: %p",
-          __func__, pipeline);
+          __func__, pipeline.get());
     return false;
   }
 
@@ -103,9 +96,9 @@ bool DrmHwcTwo::BindDisplay(DrmDisplayPipeline *pipeline) {
   return true;
 }
 
-bool DrmHwcTwo::UnbindDisplay(DrmDisplayPipeline *pipeline) {
+bool DrmHwcTwo::UnbindDisplay(std::shared_ptr<DrmDisplayPipeline> pipeline) {
   if (display_handles_.count(pipeline) == 0) {
-    ALOGE("%s, can't find the display, pipeline: %p", __func__, pipeline);
+    ALOGE("%s, can't find the display, pipeline: %p", __func__, pipeline.get());
     return false;
   }
   auto handle = display_handles_[pipeline];
@@ -119,7 +112,7 @@ bool DrmHwcTwo::UnbindDisplay(DrmDisplayPipeline *pipeline) {
     ALOGE("%s, can't find the display, handle: %" PRIu64, __func__, handle);
     return false;
   }
-  displays_[handle]->SetPipeline(nullptr);
+  displays_[handle]->SetPipeline({});
 
   /* We must defer display disposal and removal, since it may still have pending
    * HWC_API calls scheduled and waiting until ueventlistener thread releases
@@ -131,17 +124,47 @@ bool DrmHwcTwo::UnbindDisplay(DrmDisplayPipeline *pipeline) {
   return true;
 }
 
-HWC2::Error DrmHwcTwo::CreateVirtualDisplay(uint32_t /*width*/,
-                                            uint32_t /*height*/,
-                                            int32_t * /*format*/,
-                                            hwc2_display_t * /*display*/) {
-  // TODO(nobody): Implement virtual display
-  return HWC2::Error::Unsupported;
+HWC2::Error DrmHwcTwo::CreateVirtualDisplay(
+    uint32_t width, uint32_t height,
+    int32_t *format,  // NOLINT(readability-non-const-parameter)
+    hwc2_display_t *display) {
+  ALOGI("Creating virtual display %dx%d format %d", width, height, *format);
+
+  auto virtual_pipeline = resource_manager_.GetVirtualDisplayPipeline();
+  if (!virtual_pipeline)
+    return HWC2::Error::Unsupported;
+
+  *display = ++last_display_handle_;
+  auto disp = std::make_unique<HwcDisplay>(*display, HWC2::DisplayType::Virtual,
+                                           this);
+
+  disp->SetVirtualDisplayResolution(width, height);
+  disp->SetPipeline(virtual_pipeline);
+  displays_[*display] = std::move(disp);
+  return HWC2::Error::None;
 }
 
-HWC2::Error DrmHwcTwo::DestroyVirtualDisplay(hwc2_display_t /*display*/) {
-  // TODO(nobody): Implement virtual display
-  return HWC2::Error::Unsupported;
+HWC2::Error DrmHwcTwo::DestroyVirtualDisplay(hwc2_display_t display) {
+  ALOGI("Destroying virtual display %" PRIu64, display);
+
+  if (displays_.count(display) == 0) {
+    ALOGE("Trying to destroy non-existent display %" PRIu64, display);
+    return HWC2::Error::BadDisplay;
+  }
+
+  displays_[display]->SetPipeline({});
+
+  /* Wait 0.2s before removing the displays to flush pending HWC2 transactions
+   */
+  auto &mutex = GetResMan().GetMainLock();
+  mutex.unlock();
+  const int kTimeForSFToDisposeDisplayUs = 200000;
+  usleep(kTimeForSFToDisposeDisplayUs);
+  mutex.lock();
+
+  displays_.erase(display);
+
+  return HWC2::Error::None;
 }
 
 void DrmHwcTwo::Dump(uint32_t *outSize, char *outBuffer) {
@@ -163,8 +186,11 @@ void DrmHwcTwo::Dump(uint32_t *outSize, char *outBuffer) {
 }
 
 uint32_t DrmHwcTwo::GetMaxVirtualDisplayCount() {
-  // TODO(nobody): Implement virtual display
-  return 0;
+  auto writeback_count = resource_manager_.GetWritebackConnectorsCount();
+  writeback_count = std::min(writeback_count, 1U);
+  /* Currently, only 1 virtual display is supported. Other cases need testing */
+  ALOGI("Max virtual display count: %d", writeback_count);
+  return writeback_count;
 }
 
 HWC2::Error DrmHwcTwo::RegisterCallback(int32_t descriptor,
@@ -180,10 +206,7 @@ HWC2::Error DrmHwcTwo::RegisterCallback(int32_t descriptor,
         /* Headless display may still be here. Remove it! */
         if (displays_.count(kPrimaryDisplay) != 0) {
           displays_[kPrimaryDisplay]->Deinit();
-          auto &mutex = GetResMan().GetMainLock();
-          mutex.unlock();
           displays_.erase(kPrimaryDisplay);
-          mutex.lock();
         }
       }
       break;
@@ -196,7 +219,7 @@ HWC2::Error DrmHwcTwo::RegisterCallback(int32_t descriptor,
       vsync_callback_ = std::make_pair(HWC2_PFN_VSYNC(function), data);
       break;
     }
-#if PLATFORM_SDK_VERSION > 29
+#if __ANDROID_API__ > 29
     case HWC2::Callback::Vsync_2_4: {
       vsync_2_4_callback_ = std::make_pair(HWC2_PFN_VSYNC_2_4(function), data);
       break;
@@ -214,24 +237,15 @@ HWC2::Error DrmHwcTwo::RegisterCallback(int32_t descriptor,
 }
 
 void DrmHwcTwo::SendHotplugEventToClient(hwc2_display_t displayid,
-                                         bool connected) {
-  auto &mutex = GetResMan().GetMainLock();
-  if (mutex.try_lock()) {
-    ALOGE("FIXME!!!: Main mutex must be locked in %s", __func__);
-    mutex.unlock();
-    return;
-  }
-
+                                         bool connected) const {
   auto hc = hotplug_callback_;
   if (hc.first != nullptr && hc.second != nullptr) {
-    /* For some reason CLIENT will call HWC2 API in hotplug callback handler,
-     * which will cause deadlock . Unlock main mutex to prevent this.
+    /* For some reason HWC Service will call HWC2 API in hotplug callback
+     * handler. This is the reason we're using recursive mutex.
      */
-    mutex.unlock();
     hc.first(hc.second, displayid,
              connected == DRM_MODE_CONNECTED ? HWC2_CONNECTION_CONNECTED
                                              : HWC2_CONNECTION_DISCONNECTED);
-    mutex.lock();
   }
 }
 
@@ -239,7 +253,7 @@ void DrmHwcTwo::SendVsyncEventToClient(
     hwc2_display_t displayid, int64_t timestamp,
     [[maybe_unused]] uint32_t vsync_period) const {
   /* vsync callback */
-#if PLATFORM_SDK_VERSION > 29
+#if __ANDROID_API__ > 29
   if (vsync_2_4_callback_.first != nullptr &&
       vsync_2_4_callback_.second != nullptr) {
     vsync_2_4_callback_.first(vsync_2_4_callback_.second, displayid, timestamp,
@@ -255,7 +269,7 @@ void DrmHwcTwo::SendVsyncEventToClient(
 void DrmHwcTwo::SendVsyncPeriodTimingChangedEventToClient(
     [[maybe_unused]] hwc2_display_t displayid,
     [[maybe_unused]] int64_t timestamp) const {
-#if PLATFORM_SDK_VERSION > 29
+#if __ANDROID_API__ > 29
   hwc_vsync_period_change_timeline_t timeline = {
       .newVsyncAppliedTimeNanos = timestamp,
       .refreshRequired = false,

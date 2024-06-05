@@ -27,6 +27,7 @@ namespace android {
 const std::vector<std::string> BackendManager::kClientDevices = {
     "kirin",
     "mediatek-drm",
+    "pl111",
 };
 
 BackendManager &BackendManager::GetInstance() {
@@ -42,7 +43,7 @@ int BackendManager::RegisterBackend(const std::string &name,
 }
 
 int BackendManager::SetBackendForDisplay(HwcDisplay *display) {
-  std::string driver_name(display->GetPipe().device->GetName());
+  auto driver_name(display->GetPipe().device->GetName());
   char backend_override[PROPERTY_VALUE_MAX];
   property_get("vendor.hwc.backend_override", backend_override,
                driver_name.c_str());

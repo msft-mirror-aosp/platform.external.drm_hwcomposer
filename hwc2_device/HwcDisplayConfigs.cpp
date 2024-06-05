@@ -19,6 +19,7 @@
 #include "HwcDisplayConfigs.h"
 
 #include <cmath>
+#include <cstring>
 
 #include "drm/DrmConnector.h"
 #include "utils/log.h"
@@ -28,23 +29,53 @@ constexpr uint32_t kHeadlessModeDisplayHeightMm = 122;
 constexpr uint32_t kHeadlessModeDisplayWidthPx = 1024;
 constexpr uint32_t kHeadlessModeDisplayHeightPx = 768;
 constexpr uint32_t kHeadlessModeDisplayVRefresh = 60;
+constexpr uint32_t kSyncLen = 10;
+constexpr uint32_t kBackPorch = 10;
+constexpr uint32_t kFrontPorch = 10;
+constexpr uint32_t kHzInKHz = 1000;
 
 namespace android {
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 uint32_t HwcDisplayConfigs::last_config_id = 1;
 
-void HwcDisplayConfigs::FillHeadless() {
+void HwcDisplayConfigs::GenFakeMode(uint16_t width, uint16_t height) {
   hwc_configs.clear();
 
   last_config_id++;
   preferred_config_id = active_config_id = last_config_id;
   auto headless_drm_mode_info = (drmModeModeInfo){
-      .hdisplay = kHeadlessModeDisplayWidthPx,
-      .vdisplay = kHeadlessModeDisplayHeightPx,
+      .hdisplay = width,
+      .vdisplay = height,
       .vrefresh = kHeadlessModeDisplayVRefresh,
-      .name = "HEADLESS-MODE",
+      .name = "VIRTUAL-MODE",
   };
+
+  if (width == 0 || height == 0) {
+    strcpy(headless_drm_mode_info.name, "HEADLESS-MODE");
+    headless_drm_mode_info.hdisplay = kHeadlessModeDisplayWidthPx;
+    headless_drm_mode_info.vdisplay = kHeadlessModeDisplayHeightPx;
+  }
+
+  /* We need a valid mode to pass the kernel validation */
+
+  headless_drm_mode_info.hsync_start = headless_drm_mode_info.hdisplay +
+                                       kFrontPorch;
+  headless_drm_mode_info.hsync_end = headless_drm_mode_info.hsync_start +
+                                     kSyncLen;
+  headless_drm_mode_info.htotal = headless_drm_mode_info.hsync_end + kBackPorch;
+
+  headless_drm_mode_info.vsync_start = headless_drm_mode_info.vdisplay +
+                                       kFrontPorch;
+  headless_drm_mode_info.vsync_end = headless_drm_mode_info.vsync_start +
+                                     kSyncLen;
+  headless_drm_mode_info.vtotal = headless_drm_mode_info.vsync_end + kBackPorch;
+
+  headless_drm_mode_info.clock = (headless_drm_mode_info.htotal *
+                                  headless_drm_mode_info.vtotal *
+                                  headless_drm_mode_info.vrefresh) /
+                                 kHzInKHz;
+
   hwc_configs[active_config_id] = (HwcDisplayConfig){
       .id = active_config_id,
       .group_id = 1,
@@ -58,10 +89,11 @@ void HwcDisplayConfigs::FillHeadless() {
 // NOLINTNEXTLINE (readability-function-cognitive-complexity): Fixme
 HWC2::Error HwcDisplayConfigs::Update(DrmConnector &connector) {
   /* In case UpdateModes will fail we will still have one mode for headless
-   * mode*/
-  FillHeadless();
+   * mode
+   */
+  GenFakeMode(0, 0);
   /* Read real configs */
-  int ret = connector.UpdateModes();
+  auto ret = connector.UpdateModes();
   if (ret != 0) {
     ALOGE("Failed to update display modes %d", ret);
     return HWC2::Error::BadDisplay;
@@ -79,7 +111,7 @@ HWC2::Error HwcDisplayConfigs::Update(DrmConnector &connector) {
   preferred_config_id = 0;
   uint32_t preferred_config_group_id = 0;
 
-  uint32_t first_config_id = last_config_id;
+  auto first_config_id = last_config_id;
   uint32_t last_group_id = 1;
 
   /* Group modes */
@@ -87,8 +119,10 @@ HWC2::Error HwcDisplayConfigs::Update(DrmConnector &connector) {
     /* Find group for the new mode or create new group */
     uint32_t group_found = 0;
     for (auto &hwc_config : hwc_configs) {
-      if (mode.h_display() == hwc_config.second.mode.h_display() &&
-          mode.v_display() == hwc_config.second.mode.v_display()) {
+      if (mode.GetRawMode().hdisplay ==
+              hwc_config.second.mode.GetRawMode().hdisplay &&
+          mode.GetRawMode().vdisplay ==
+              hwc_config.second.mode.GetRawMode().vdisplay) {
         group_found = hwc_config.second.group_id;
       }
     }
@@ -97,9 +131,9 @@ HWC2::Error HwcDisplayConfigs::Update(DrmConnector &connector) {
     }
 
     bool disabled = false;
-    if ((mode.flags() & DRM_MODE_FLAG_3D_MASK) != 0) {
+    if ((mode.GetRawMode().flags & DRM_MODE_FLAG_3D_MASK) != 0) {
       ALOGI("Disabling display mode %s (Modes with 3D flag aren't supported)",
-            mode.name().c_str());
+            mode.GetName().c_str());
       disabled = true;
     }
 
@@ -112,7 +146,7 @@ HWC2::Error HwcDisplayConfigs::Update(DrmConnector &connector) {
     };
 
     /* Chwck if the mode is preferred */
-    if ((mode.type() & DRM_MODE_TYPE_PREFERRED) != 0 &&
+    if ((mode.GetRawMode().type & DRM_MODE_TYPE_PREFERRED) != 0 &&
         preferred_config_id == 0) {
       preferred_config_id = last_config_id;
       preferred_config_group_id = group_found;
@@ -143,7 +177,7 @@ HWC2::Error HwcDisplayConfigs::Update(DrmConnector &connector) {
       }
     }
 
-    bool has_both = has_interlaced && has_progressive;
+    auto has_both = has_interlaced && has_progressive;
     if (!has_both) {
       continue;
     }
@@ -159,7 +193,7 @@ HWC2::Error HwcDisplayConfigs::Update(DrmConnector &connector) {
         continue;
       }
 
-      bool disable = group_contains_preferred_interlaced
+      auto disable = group_contains_preferred_interlaced
                          ? !hwc_config.second.IsInterlaced()
                          : hwc_config.second.IsInterlaced();
 
@@ -167,7 +201,7 @@ HWC2::Error HwcDisplayConfigs::Update(DrmConnector &connector) {
         ALOGI(
             "Group %i: Disabling display mode %s (This group should consist "
             "of %s modes)",
-            group, hwc_config.second.mode.name().c_str(),
+            group, hwc_config.second.mode.GetName().c_str(),
             group_contains_preferred_interlaced ? "interlaced" : "progressive");
 
         hwc_config.second.disabled = true;
@@ -183,13 +217,13 @@ HWC2::Error HwcDisplayConfigs::Update(DrmConnector &connector) {
     for (uint32_t m2 = first_config_id; m2 < last_config_id; m2++) {
       if (m1 != m2 && hwc_configs[m1].group_id == hwc_configs[m2].group_id &&
           !hwc_configs[m1].disabled && !hwc_configs[m2].disabled &&
-          fabsf(hwc_configs[m1].mode.v_refresh() -
-                hwc_configs[m2].mode.v_refresh()) < kMinFpsDelta) {
+          fabsf(hwc_configs[m1].mode.GetVRefresh() -
+                hwc_configs[m2].mode.GetVRefresh()) < kMinFpsDelta) {
         ALOGI(
             "Group %i: Disabling display mode %s (Refresh rate value is "
             "too close to existing mode %s)",
-            hwc_configs[m2].group_id, hwc_configs[m2].mode.name().c_str(),
-            hwc_configs[m1].mode.name().c_str());
+            hwc_configs[m2].group_id, hwc_configs[m2].mode.GetName().c_str(),
+            hwc_configs[m1].mode.GetName().c_str());
 
         hwc_configs[m2].disabled = true;
       }
