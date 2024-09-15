@@ -1,5 +1,5 @@
 
-BASE_DIR:=../aospless
+BASE_DIR ?=../aospless
 
 SYSTEM_INCLUDE_DIRS := /usr/include/libdrm
 
@@ -40,6 +40,7 @@ TIDY_CHECKS_FINE := *                                   \
     -llvmlibc* -fuchsia-* -altera-*                     \
     -llvm-header-guard                                  \
     -cppcoreguidelines-pro-type-vararg                  \
+    -google-readability-todo                            \
     -hicpp-vararg                                       \
     -hicpp-signed-bitwise                               \
     -readability-identifier-length                      \
