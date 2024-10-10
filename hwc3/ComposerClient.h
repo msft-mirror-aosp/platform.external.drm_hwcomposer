@@ -20,6 +20,7 @@
 
 #include "aidl/android/hardware/graphics/composer3/BnComposerClient.h"
 #include "aidl/android/hardware/graphics/composer3/LayerCommand.h"
+#include <aidl/android/hardware/graphics/composer3/Lut.h>
 #include "hwc3/CommandResultWriter.h"
 #include "hwc3/ComposerResources.h"
 #include "hwc3/Utils.h"
@@ -178,6 +179,8 @@ class ComposerClient : public BnComposerClient {
                              const ZOrder& z_order);
   void ExecuteSetLayerBrightness(int64_t display_id, HwcLayerWrapper& layer,
                                  const LayerBrightness& brightness);
+  void ExecuteLayerCommandSetLayerLuts(int64_t display_id, HwcLayerWrapper& layer,
+                                       const std::vector<std::optional<Lut>>& luts);
 
   // Display commands
   void ExecuteDisplayCommand(const DisplayCommand& command);
