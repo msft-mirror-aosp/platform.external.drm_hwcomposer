@@ -332,6 +332,9 @@ void ComposerClient::DispatchLayerCommand(int64_t display_id,
   if (command.brightness) {
     ExecuteSetLayerBrightness(display_id, layer_wrapper, *command.brightness);
   }
+  if (command.luts) {
+    ExecuteLayerCommandSetLayerLuts(display_id, layer_wrapper, *command.luts);
+  }
 
   // Some unsupported functionality returns kUnsupported, and others
   // are just a no-op.
@@ -1130,6 +1133,12 @@ void ComposerClient::ExecuteSetLayerBrightness(
       std::isnan(brightness.brightness)) {
     cmd_result_writer_->AddError(hwc3::Error::kBadParameter);
   }
+}
+
+void ComposerClient::ExecuteLayerCommandSetLayerLuts(
+    int64_t /*display_id*/, HwcLayerWrapper& /*layer*/,
+    const std::vector<std::optional<Lut>>& /*luts*/) {
+  cmd_result_writer_->AddError(hwc3::Error::kUnsupported);
 }
 
 void ComposerClient::ExecuteSetDisplayBrightness(
