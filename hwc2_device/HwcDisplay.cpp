@@ -19,10 +19,12 @@
 
 #include "HwcDisplay.h"
 
-#include "DrmHwcTwo.h"
+#include <cinttypes>
+
 #include "backend/Backend.h"
 #include "backend/BackendManager.h"
 #include "bufferinfo/BufferInfoGetter.h"
+#include "drm/DrmHwc.h"
 #include "utils/log.h"
 #include "utils/properties.h"
 
@@ -66,14 +68,14 @@ std::string HwcDisplay::Dump() {
 }
 
 HwcDisplay::HwcDisplay(hwc2_display_t handle, HWC2::DisplayType type,
-                       DrmHwcTwo *hwc2)
-    : hwc2_(hwc2), handle_(handle), type_(type), client_layer_(this) {
+                       DrmHwc *hwc)
+    : hwc_(hwc), handle_(handle), type_(type), client_layer_(this) {
   if (type_ == HWC2::DisplayType::Virtual) {
     writeback_layer_ = std::make_unique<HwcLayer>(this);
   }
 }
 
-void HwcDisplay::SetColorMarixToIdentity() {
+void HwcDisplay::SetColorMatrixToIdentity() {
   color_matrix_ = std::make_shared<drm_color_ctm>();
   for (int i = 0; i < kCtmCols; i++) {
     for (int j = 0; j < kCtmRows; j++) {
@@ -85,7 +87,9 @@ void HwcDisplay::SetColorMarixToIdentity() {
   color_transform_hint_ = HAL_COLOR_TRANSFORM_IDENTITY;
 }
 
-HwcDisplay::~HwcDisplay() = default;
+HwcDisplay::~HwcDisplay() {
+  Deinit();
+};
 
 void HwcDisplay::SetPipeline(std::shared_ptr<DrmDisplayPipeline> pipeline) {
   Deinit();
@@ -94,9 +98,9 @@ void HwcDisplay::SetPipeline(std::shared_ptr<DrmDisplayPipeline> pipeline) {
 
   if (pipeline_ != nullptr || handle_ == kPrimaryDisplay) {
     Init();
-    hwc2_->ScheduleHotplugEvent(handle_, /*connected = */ true);
+    hwc_->ScheduleHotplugEvent(handle_, DrmHwc::kConnected);
   } else {
-    hwc2_->ScheduleHotplugEvent(handle_, /*connected = */ false);
+    hwc_->ScheduleHotplugEvent(handle_, DrmHwc::kDisconnected);
   }
 }
 
@@ -131,6 +135,8 @@ void HwcDisplay::Deinit() {
   }
 
   if (vsync_worker_) {
+    // TODO: There should be a mechanism to wait for this worker to complete,
+    // otherwise there is a race condition while destructing the HwcDisplay.
     vsync_worker_->StopThread();
     vsync_worker_ = {};
   }
@@ -144,11 +150,11 @@ HWC2::Error HwcDisplay::Init() {
   auto vsw_callbacks = (VSyncWorkerCallbacks){
       .out_event =
           [this](int64_t timestamp) {
-            const std::unique_lock lock(hwc2_->GetResMan().GetMainLock());
+            const std::unique_lock lock(hwc_->GetResMan().GetMainLock());
             if (vsync_event_en_) {
               uint32_t period_ns{};
               GetDisplayVsyncPeriod(&period_ns);
-              hwc2_->SendVsyncEventToClient(handle_, timestamp, period_ns);
+              hwc_->SendVsyncEventToClient(handle_, timestamp, period_ns);
             }
             if (vsync_tracking_en_) {
               last_vsync_ts_ = timestamp;
@@ -178,18 +184,14 @@ HWC2::Error HwcDisplay::Init() {
       ALOGE("Failed to set backend for d=%d %d\n", int(handle_), ret);
       return HWC2::Error::BadDisplay;
     }
-    auto flatcbk = (struct FlatConCallbacks){.trigger = [this]() {
-      if (hwc2_->refresh_callback_.first != nullptr &&
-          hwc2_->refresh_callback_.second != nullptr)
-        hwc2_->refresh_callback_.first(hwc2_->refresh_callback_.second,
-                                       handle_);
-    }};
+    auto flatcbk = (struct FlatConCallbacks){
+        .trigger = [this]() { hwc_->SendRefreshEventToClient(handle_); }};
     flatcon_ = FlatteningController::CreateInstance(flatcbk);
   }
 
   client_layer_.SetLayerBlendMode(HWC2_BLEND_MODE_PREMULTIPLIED);
 
-  SetColorMarixToIdentity();
+  SetColorMatrixToIdentity();
 
   return HWC2::Error::None;
 }
@@ -310,7 +312,6 @@ HWC2::Error HwcDisplay::GetDisplayAttribute(hwc2_config_t config,
 
   static const int32_t kUmPerInch = 25400;
   auto mm_width = configs_.mm_width;
-  auto mm_height = configs_.mm_height;
   auto attribute = static_cast<HWC2::Attribute>(attribute_in);
   switch (attribute) {
     case HWC2::Attribute::Width:
@@ -321,19 +322,18 @@ HWC2::Error HwcDisplay::GetDisplayAttribute(hwc2_config_t config,
       break;
     case HWC2::Attribute::VsyncPeriod:
       // in nanoseconds
-      *value = static_cast<int>(1E9 / hwc_config.mode.GetVRefresh());
+      *value = hwc_config.mode.GetVSyncPeriodNs();
       break;
+    case HWC2::Attribute::DpiY:
+      // ideally this should be vdisplay/mm_heigth, however mm_height
+      // comes from edid parsing and is highly unreliable. Viewing the
+      // rarity of anisotropic displays, falling back to a single value
+      // for dpi yield more correct output.
     case HWC2::Attribute::DpiX:
       // Dots per 1000 inches
       *value = mm_width ? int(hwc_config.mode.GetRawMode().hdisplay *
                               kUmPerInch / mm_width)
                         : -1;
-      break;
-    case HWC2::Attribute::DpiY:
-      // Dots per 1000 inches
-      *value = mm_height ? int(hwc_config.mode.GetRawMode().vdisplay *
-                               kUmPerInch / mm_height)
-                         : -1;
       break;
 #if __ANDROID_API__ > 29
     case HWC2::Attribute::ConfigGroup:
@@ -349,8 +349,8 @@ HWC2::Error HwcDisplay::GetDisplayAttribute(hwc2_config_t config,
   return HWC2::Error::None;
 }
 
-HWC2::Error HwcDisplay::GetDisplayConfigs(uint32_t *num_configs,
-                                          hwc2_config_t *configs) {
+HWC2::Error HwcDisplay::LegacyGetDisplayConfigs(uint32_t *num_configs,
+                                                hwc2_config_t *configs) {
   uint32_t idx = 0;
   for (auto &hwc_config : configs_.hwc_configs) {
     if (hwc_config.second.disabled) {
@@ -464,6 +464,8 @@ HWC2::Error HwcDisplay::CreateComposition(AtomicCommitArgs &a_args) {
   }
 
   a_args.color_matrix = color_matrix_;
+  a_args.content_type = content_type_;
+  a_args.colorspace = colorspace_;
 
   uint32_t prev_vperiod_ns = 0;
   GetDisplayVsyncPeriod(&prev_vperiod_ns);
@@ -564,9 +566,9 @@ HWC2::Error HwcDisplay::CreateComposition(AtomicCommitArgs &a_args) {
     staged_mode_.reset();
     vsync_tracking_en_ = false;
     if (last_vsync_ts_ != 0) {
-      hwc2_->SendVsyncPeriodTimingChangedEventToClient(handle_,
-                                                       last_vsync_ts_ +
-                                                           prev_vperiod_ns);
+      hwc_->SendVsyncPeriodTimingChangedEventToClient(handle_,
+                                                      last_vsync_ts_ +
+                                                          prev_vperiod_ns);
     }
   }
 
@@ -673,17 +675,50 @@ HWC2::Error HwcDisplay::SetClientTarget(buffer_handle_t target,
 }
 
 HWC2::Error HwcDisplay::SetColorMode(int32_t mode) {
-  if (mode < HAL_COLOR_MODE_NATIVE || mode > HAL_COLOR_MODE_BT2100_HLG)
+  /* Maps to the Colorspace DRM connector property:
+   * https://elixir.bootlin.com/linux/v6.11/source/include/drm/drm_connector.h#L538
+   */
+  if (mode < HAL_COLOR_MODE_NATIVE || mode > HAL_COLOR_MODE_DISPLAY_P3)
     return HWC2::Error::BadParameter;
 
-  if (mode != HAL_COLOR_MODE_NATIVE)
-    return HWC2::Error::Unsupported;
+  switch (mode) {
+    case HAL_COLOR_MODE_NATIVE:
+      colorspace_ = Colorspace::kDefault;
+      break;
+    case HAL_COLOR_MODE_STANDARD_BT601_625:
+    case HAL_COLOR_MODE_STANDARD_BT601_625_UNADJUSTED:
+    case HAL_COLOR_MODE_STANDARD_BT601_525:
+    case HAL_COLOR_MODE_STANDARD_BT601_525_UNADJUSTED:
+      // The DP spec does not say whether this is the 525 or the 625 line version.
+      colorspace_ = Colorspace::kBt601Ycc;
+      break;
+    case HAL_COLOR_MODE_STANDARD_BT709:
+    case HAL_COLOR_MODE_SRGB:
+      colorspace_ = Colorspace::kBt709Ycc;
+      break;
+    case HAL_COLOR_MODE_DCI_P3:
+    case HAL_COLOR_MODE_DISPLAY_P3:
+      colorspace_ = Colorspace::kDciP3RgbD65;
+      break;
+    case HAL_COLOR_MODE_ADOBE_RGB:
+    default:
+      return HWC2::Error::Unsupported;
+  }
 
   color_mode_ = mode;
   return HWC2::Error::None;
 }
 
 #include <xf86drmMode.h>
+
+static uint64_t To3132FixPt(float in) {
+  constexpr uint64_t kSignMask = (1ULL << 63);
+  constexpr uint64_t kValueMask = ~(1ULL << 63);
+  constexpr auto kValueScale = static_cast<float>(1ULL << 32);
+  if (in < 0)
+    return (static_cast<uint64_t>(-in * kValueScale) & kValueMask) | kSignMask;
+  return static_cast<uint64_t>(in * kValueScale) & kValueMask;
+}
 
 HWC2::Error HwcDisplay::SetColorTransform(const float *matrix, int32_t hint) {
   if (hint < HAL_COLOR_TRANSFORM_IDENTITY ||
@@ -703,17 +738,40 @@ HWC2::Error HwcDisplay::SetColorTransform(const float *matrix, int32_t hint) {
 
   switch (color_transform_hint_) {
     case HAL_COLOR_TRANSFORM_IDENTITY:
-      SetColorMarixToIdentity();
+      SetColorMatrixToIdentity();
       break;
     case HAL_COLOR_TRANSFORM_ARBITRARY_MATRIX:
+      // Without HW support, we cannot correctly process matrices with an offset.
+      for (int i = 12; i < 14; i++) {
+        if (matrix[i] != 0.F)
+          return HWC2::Error::Unsupported;
+      }
+
+      /* HAL provides a 4x4 float type matrix:
+       * | 0  1  2  3|
+       * | 4  5  6  7|
+       * | 8  9 10 11|
+       * |12 13 14 15|
+       *
+       * R_out = R*0 + G*4 + B*8 + 12
+       * G_out = R*1 + G*5 + B*9 + 13
+       * B_out = R*2 + G*6 + B*10 + 14
+       *
+       * DRM expects a 3x3 s31.32 fixed point matrix:
+       * out   matrix    in
+       * |R|   |0 1 2|   |R|
+       * |G| = |3 4 5| x |G|
+       * |B|   |6 7 8|   |B|
+       *
+       * R_out = R*0 + G*1 + B*2
+       * G_out = R*3 + G*4 + B*5
+       * B_out = R*6 + G*7 + B*8
+       */
       color_matrix_ = std::make_shared<drm_color_ctm>();
-      /* DRM expects a 3x3 matrix, but the HAL provides a 4x4 matrix. */
       for (int i = 0; i < kCtmCols; i++) {
         for (int j = 0; j < kCtmRows; j++) {
           constexpr int kInCtmRows = 4;
-          /* HAL matrix type is float, but DRM expects a s31.32 fix point */
-          auto value = uint64_t(matrix[i * kInCtmRows + j] * float(1ULL << 32));
-          color_matrix_->matrix[i * kCtmRows + j] = value;
+          color_matrix_->matrix[i * kCtmRows + j] = To3132FixPt(matrix[j * kInCtmRows + i]);
         }
       }
       break;
@@ -731,7 +789,7 @@ bool HwcDisplay::CtmByGpu() {
   if (GetPipe().crtc->Get()->GetCtmProperty())
     return false;
 
-  if (GetHwc2()->GetResMan().GetCtmHandling() == CtmHandling::kDrmOrIgnore)
+  if (GetHwc()->GetResMan().GetCtmHandling() == CtmHandling::kDrmOrIgnore)
     return false;
 
   return true;
@@ -918,12 +976,13 @@ HWC2::Error HwcDisplay::GetSupportedContentTypes(
 }
 
 HWC2::Error HwcDisplay::SetContentType(int32_t contentType) {
-  if (contentType != HWC2_CONTENT_TYPE_NONE)
-    return HWC2::Error::Unsupported;
-
-  /* TODO: Map to the DRM Connector property:
-   * https://elixir.bootlin.com/linux/v5.4-rc5/source/drivers/gpu/drm/drm_connector.c#L809
+  /* Maps exactly to the content_type DRM connector property:
+   * https://elixir.bootlin.com/linux/v6.11/source/include/uapi/drm/drm_mode.h#L107
    */
+  if (contentType < HWC2_CONTENT_TYPE_NONE || contentType > HWC2_CONTENT_TYPE_GAME)
+    return HWC2::Error::BadParameter;
+
+  content_type_ = contentType;
 
   return HWC2::Error::None;
 }
@@ -963,7 +1022,7 @@ HWC2::Error HwcDisplay::GetDisplayCapabilities(uint32_t *outNumCapabilities,
   bool skip_ctm = false;
 
   // Skip client CTM if user requested DRM_OR_IGNORE
-  if (GetHwc2()->GetResMan().GetCtmHandling() == CtmHandling::kDrmOrIgnore)
+  if (GetHwc()->GetResMan().GetCtmHandling() == CtmHandling::kDrmOrIgnore)
     skip_ctm = true;
 
   // Skip client CTM if DRM can handle it
@@ -1018,16 +1077,12 @@ HWC2::Error HwcDisplay::SetColorModeWithIntent(int32_t mode, int32_t intent) {
       intent > HAL_RENDER_INTENT_TONE_MAP_ENHANCE)
     return HWC2::Error::BadParameter;
 
-  if (mode < HAL_COLOR_MODE_NATIVE || mode > HAL_COLOR_MODE_BT2100_HLG)
-    return HWC2::Error::BadParameter;
-
-  if (mode != HAL_COLOR_MODE_NATIVE)
-    return HWC2::Error::Unsupported;
-
   if (intent != HAL_RENDER_INTENT_COLORIMETRIC)
     return HWC2::Error::Unsupported;
 
-  color_mode_ = mode;
+  auto err = SetColorMode(mode);
+  if (err != HWC2::Error::None) return err;
+
   return HWC2::Error::None;
 }
 
