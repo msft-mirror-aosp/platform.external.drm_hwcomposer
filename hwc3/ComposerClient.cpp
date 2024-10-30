@@ -1259,6 +1259,11 @@ ndk::ScopedAStatus ComposerClient::notifyExpectedPresent(
   return ToBinderStatus(hwc3::Error::kUnsupported);
 }
 
+ndk::ScopedAStatus ComposerClient::startHdcpNegotiation(
+    int64_t /*display*/, const AidlHdcpLevels& /*levels*/) {
+  return ToBinderStatus(hwc3::Error::kUnsupported);
+}
+
 #endif
 
 std::string ComposerClient::Dump() {
