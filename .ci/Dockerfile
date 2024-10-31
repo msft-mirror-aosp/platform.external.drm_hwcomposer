@@ -1,4 +1,4 @@
-FROM ubuntu:23.04
+FROM ubuntu:24.10
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -6,7 +6,7 @@ ENV PATH="/home/user/bin:${PATH}"
 
 # Taking into account layer structure, everything should be done within one layer.
 RUN apt-get update && apt-get upgrade -y && \
-    apt-get install -y clang-15 clang-tidy-15 clang-format-15 git libdrm-dev blueprint-tools libgtest-dev clang \
+    apt-get install -y clang-19 clang-tidy-19 clang-format-19 git libdrm-dev blueprint-tools libgtest-dev clang \
     llvm make python3 wget sudo rsync lld pkg-config ninja-build meson \
     python3-mako python3-jinja2 python3-ply python3-yaml
 
@@ -41,12 +41,11 @@ RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> \
 USER ${RUN_USER}
 
 # Install aospless package (produced by GloDroid/aospext)
-RUN wget -P ${USER_HOME} https://gitlab.freedesktop.org/drm-hwcomposer/drm-hwcomposer/uploads/af611363cabab0e9557c53b844197228/aospless_drm_hwcomposer_arm64.tar.xz && \
+RUN wget -P ${USER_HOME} https://gitlab.freedesktop.org/-/project/5/uploads/70643bd1c4d419015b9930b7aadc9cfd/aospless_drm_hwcomposer_arm64.tar.xz && \
     cd ${USER_HOME} && \
     sha256sum aospless_drm_hwcomposer_arm64.tar.xz && \
-    (echo 07b70f3172acf55dafb5882fab0c6c618854e3a9ff7496fa8b1e5fd2ee68cf0a aospless_drm_hwcomposer_arm64.tar.xz | sha256sum --check) && \
-    tar xf aospless_drm_hwcomposer_arm64.tar.xz && \
-    rm -r ${USER_HOME}/aospless/src && ln -s ../drm_hwcomposer/ ${USER_HOME}/aospless/src
+    (echo 640e0d0e04761c804db69f880e0c0957699babdbe82c72c507177b860d878569 aospless_drm_hwcomposer_arm64.tar.xz | sha256sum --check) && \
+    tar xf aospless_drm_hwcomposer_arm64.tar.xz && ln -s ../drm_hwcomposer/ ${USER_HOME}/aospless/src
 
 # Create project path
 RUN mkdir -pv ${USER_HOME}/drm_hwcomposer
