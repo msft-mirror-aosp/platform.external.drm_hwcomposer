@@ -42,6 +42,8 @@ cc_defaults {
     name: "hwcomposer.drm_defaults",
 
     shared_libs: [
+        "android.hardware.graphics.composer@2.1-resources",
+        "android.hardware.graphics.composer@2.2-resources",
         "libcutils",
         "libdrm",
         "libhardware",
@@ -52,7 +54,13 @@ cc_defaults {
         "libutils",
     ],
 
-    header_libs: ["drm_hwcomposer_headers"],
+    static_libs: [
+        "libaidlcommonsupport",
+    ],
+
+    header_libs: [
+        "drm_hwcomposer_headers",
+    ],
 
     cflags: [
         "-Wall",
@@ -63,6 +71,8 @@ cc_defaults {
         "-DHWC2_INCLUDE_STRINGIFICATION",
         "-DHWC2_USE_CPP11",
     ],
+
+    cpp_std: "gnu++17",
 
     relative_install_path: "hw",
     vendor: true,
@@ -89,6 +99,7 @@ filegroup {
         "drm/DrmDisplayPipeline.cpp",
         "drm/DrmEncoder.cpp",
         "drm/DrmFbImporter.cpp",
+        "drm/DrmHwc.cpp",
         "drm/DrmMode.cpp",
         "drm/DrmPlane.cpp",
         "drm/DrmProperty.cpp",
@@ -107,6 +118,38 @@ filegroup {
         "hwc2_device/hwc2_device.cpp",
 
         "utils/fd.cpp",
+    ],
+}
+
+filegroup {
+    name: "drm_hwcomposer_hwc3",
+    srcs: [
+        "hwc3/Composer.cpp",
+        "hwc3/ComposerClient.cpp",
+        "hwc3/ComposerResources.cpp",
+        "hwc3/DrmHwcThree.cpp",
+        "hwc3/Utils.cpp",
+    ],
+}
+
+filegroup {
+    name: "drm_hwcomposer_service",
+    srcs: [
+        "hwc3/service.cpp",
+    ],
+}
+
+filegroup {
+    name: "drm_hwcomposer_init_rc",
+    srcs: [
+        "hwc3/hwc3-drm.rc",
+    ],
+}
+
+filegroup {
+    name: "drm_hwcomposer_vintf_manifest",
+    srcs: [
+        "hwc3/hwc3-drm.xml",
     ],
 }
 
@@ -136,6 +179,47 @@ cc_library_shared {
     ],
 }
 
+cc_binary {
+    name: "android.hardware.composer.hwc3-service.drm",
+
+    srcs: [
+        ":drm_hwcomposer_common",
+        ":drm_hwcomposer_hwc3",
+        ":drm_hwcomposer_service",
+        "bufferinfo/legacy/BufferInfoLibdrm.cpp",
+    ],
+
+    defaults: [
+        "hwcomposer.drm_defaults",
+    ],
+
+    shared_libs: [
+        "android.hardware.graphics.composer3-V4-ndk",
+        "libbase",
+        "libbinder_ndk",
+        "liblog",
+        "libutils",
+    ],
+
+    cflags: [
+        "-Wall",
+        "-Werror",
+
+        "-DUSE_IMAPPER4_METADATA_API",
+    ],
+
+    cppflags: [
+        "-DHWC2_INCLUDE_STRINGIFICATION",
+        "-DHWC2_USE_CPP11",
+    ],
+
+    relative_install_path: "hw",
+    vendor: true,
+
+    vintf_fragments: [":drm_hwcomposer_vintf_manifest"],
+    init_rc: [":drm_hwcomposer_init_rc"],
+}
+
 // Used by hwcomposer.drm_imagination
 filegroup {
     name: "drm_hwcomposer_platformimagination",
@@ -158,4 +242,61 @@ filegroup {
 filegroup {
     name: "drm_hwcomposer_platformmediatek",
     srcs: ["bufferinfo/legacy/BufferInfoMaliMediatek.cpp"],
+}
+
+prebuilt_etc {
+    name: "drm_hwcomposer_hwc3_apex_vintf",
+    src: "hwc3/hwc3-drm.xml",
+    sub_dir: "vintf",
+    vendor: true,
+    installable: false,
+}
+
+prebuilt_etc {
+    name: "drm_hwcomposer_hwc3_apex_init_rc",
+    filename_from_src: true,
+    vendor: true,
+    src: ":gen-drm_hwcomposer_hwc3_apex_init_rc",
+}
+
+genrule {
+    name: "gen-drm_hwcomposer_hwc3_apex_init_rc",
+    srcs: ["hwc3/hwc3-drm.rc"],
+    out: ["hwc3-drm.apex.rc"],
+    cmd: "sed " +
+        // Update the binary location to inside the Apex:
+        "-e 's%/vendor/bin/%/apex/com.android.hardware.graphics.composer/bin/%' " +
+        "$(in) > $(out)",
+}
+
+filegroup {
+    name: "drm_hwcomposer_hwc3_apex_file_contexts",
+    srcs: [
+        "hwc3/hwc3-apex-file-contexts",
+    ],
+}
+
+filegroup {
+    name: "drm_hwcomposer_hwc3_apex_manifest",
+    srcs: [
+        "hwc3/hwc3-apex-manifest.json",
+    ],
+}
+
+apex {
+    name: "com.android.hardware.graphics.composer.drm_hwcomposer",
+    key: "com.android.hardware.key",
+    certificate: ":com.android.hardware.certificate",
+    file_contexts: ":drm_hwcomposer_hwc3_apex_file_contexts",
+    manifest: ":drm_hwcomposer_hwc3_apex_manifest",
+    vendor: true,
+    updatable: false,
+    soc_specific: true,
+    binaries: [
+        "android.hardware.composer.hwc3-service.drm",
+    ],
+    prebuilts: [
+        "drm_hwcomposer_hwc3_apex_init_rc",
+        "drm_hwcomposer_hwc3_apex_vintf",
+    ],
 }

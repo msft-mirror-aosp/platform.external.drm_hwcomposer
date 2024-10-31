@@ -39,6 +39,10 @@ ResourceManager::ResourceManager(
   uevent_listener_ = UEventListener::CreateInstance();
 }
 
+ResourceManager::~ResourceManager() {
+  uevent_listener_->StopThread();
+}
+
 void ResourceManager::Init() {
   if (initialized_) {
     ALOGE("Already initialized");
@@ -149,6 +153,10 @@ void ResourceManager::UpdateFrontendDisplays() {
         frontend_interface_->UnbindDisplay(pipeline);
         attached_pipelines_.erase(conn);
       }
+    }
+    if (connected) {
+      if (!conn->IsLinkStatusGood())
+        frontend_interface_->NotifyDisplayLinkStatus(attached_pipelines_[conn]);
     }
   }
   frontend_interface_->FinalizeDisplayBinding();

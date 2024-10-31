@@ -23,6 +23,7 @@
 #include <sstream>
 
 #include "HwcDisplayConfigs.h"
+#include "compositor/DisplayInfo.h"
 #include "compositor/FlatteningController.h"
 #include "compositor/LayerData.h"
 #include "drm/DrmAtomicStateManager.h"
@@ -33,14 +34,14 @@
 namespace android {
 
 class Backend;
-class DrmHwcTwo;
+class DrmHwc;
 
 inline constexpr uint32_t kPrimaryDisplay = 0;
 
 // NOLINTNEXTLINE
 class HwcDisplay {
  public:
-  HwcDisplay(hwc2_display_t handle, HWC2::DisplayType type, DrmHwcTwo *hwc2);
+  HwcDisplay(hwc2_display_t handle, HWC2::DisplayType type, DrmHwc *hwc);
   HwcDisplay(const HwcDisplay &) = delete;
   ~HwcDisplay();
 
@@ -54,7 +55,11 @@ class HwcDisplay {
 
   std::string Dump();
 
-  // HWC Hooks
+  const HwcDisplayConfigs &GetDisplayConfigs() const {
+    return configs_;
+  }
+
+  // HWC2 Hooks - these should not be used outside of the hwc2 device.
   HWC2::Error AcceptDisplayChanges();
   HWC2::Error CreateLayer(hwc2_layer_t *layer);
   HWC2::Error DestroyLayer(hwc2_layer_t layer);
@@ -66,7 +71,8 @@ class HwcDisplay {
   HWC2::Error GetColorModes(uint32_t *num_modes, int32_t *modes);
   HWC2::Error GetDisplayAttribute(hwc2_config_t config, int32_t attribute,
                                   int32_t *value);
-  HWC2::Error GetDisplayConfigs(uint32_t *num_configs, hwc2_config_t *configs);
+  HWC2::Error LegacyGetDisplayConfigs(uint32_t *num_configs,
+                                      hwc2_config_t *configs);
   HWC2::Error GetDisplayName(uint32_t *size, char *name);
   HWC2::Error GetDisplayRequests(int32_t *display_requests,
                                  uint32_t *num_elements, hwc2_layer_t *layers,
@@ -149,8 +155,8 @@ class HwcDisplay {
   const Backend *backend() const;
   void set_backend(std::unique_ptr<Backend> backend);
 
-  auto GetHwc2() {
-    return hwc2_;
+  auto GetHwc() {
+    return hwc_;
   }
 
   std::map<hwc2_layer_t, HwcLayer> &layers() {
@@ -192,10 +198,12 @@ class HwcDisplay {
     virtual_disp_height_ = height;
   }
 
+  auto getDisplayPhysicalOrientation() -> std::optional<PanelOrientation>;
+
  private:
   HwcDisplayConfigs configs_;
 
-  DrmHwcTwo *const hwc2_;
+  DrmHwc *const hwc_;
 
   SharedFd present_fence_;
 
@@ -228,6 +236,8 @@ class HwcDisplay {
   static constexpr int kCtmCols = 3;
   std::shared_ptr<drm_color_ctm> color_matrix_;
   android_color_transform_t color_transform_hint_{};
+  int32_t content_type_{};
+  Colorspace colorspace_{};
 
   std::shared_ptr<DrmKmsPlan> current_plan_;
 
@@ -236,7 +246,7 @@ class HwcDisplay {
   Stats prev_stats_;
   std::string DumpDelta(HwcDisplay::Stats delta);
 
-  void SetColorMarixToIdentity();
+  void SetColorMatrixToIdentity();
 
   HWC2::Error Init();
 
