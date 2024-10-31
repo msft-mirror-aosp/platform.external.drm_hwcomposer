@@ -124,6 +124,16 @@ bool DrmHwc::UnbindDisplay(std::shared_ptr<DrmDisplayPipeline> pipeline) {
   return true;
 }
 
+void DrmHwc::NotifyDisplayLinkStatus(
+    std::shared_ptr<DrmDisplayPipeline> pipeline) {
+  if (display_handles_.count(pipeline) == 0) {
+    ALOGE("%s, can't find the display, pipeline: %p", __func__, pipeline.get());
+    return;
+  }
+  ScheduleHotplugEvent(display_handles_[pipeline],
+                       DisplayStatus::kLinkTrainingFailed);
+}
+
 HWC2::Error DrmHwc::CreateVirtualDisplay(
     uint32_t width, uint32_t height,
     int32_t *format,  // NOLINT(readability-non-const-parameter)
@@ -191,6 +201,12 @@ uint32_t DrmHwc::GetMaxVirtualDisplayCount() {
   /* Currently, only 1 virtual display is supported. Other cases need testing */
   ALOGI("Max virtual display count: %d", writeback_count);
   return writeback_count;
+}
+
+void DrmHwc::DeinitDisplays() {
+  for (auto &pair : Displays()) {
+    pair.second->SetPipeline(nullptr);
+  }
 }
 
 }  // namespace android
