@@ -1261,6 +1261,10 @@ ndk::ScopedAStatus ComposerClient::notifyExpectedPresent(
 
 #endif
 
+ndk::ScopedAStatus ComposerClient::getMaxLayerPictureProfiles(int64_t, int32_t*) {
+  return ToBinderStatus(hwc3::Error::kUnsupported);
+}
+
 std::string ComposerClient::Dump() {
   uint32_t size = 0;
   hwc_->Dump(&size, nullptr);

@@ -152,6 +152,9 @@ class ComposerClient : public BnComposerClient {
 
 #endif
 
+  ndk::ScopedAStatus getMaxLayerPictureProfiles(
+      int64_t display, int32_t* maxProfiles) override;
+
  protected:
   ::ndk::SpAIBinder createBinder() override;
 
