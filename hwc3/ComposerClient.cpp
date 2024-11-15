@@ -109,6 +109,8 @@ std::optional<BufferColorSpace> AidlToColorSpace(
     case static_cast<int32_t>(
         common::Dataspace::STANDARD_BT2020_CONSTANT_LUMINANCE):
       return BufferColorSpace::kItuRec2020;
+    case static_cast<int32_t>(common::Dataspace::UNKNOWN):
+      return BufferColorSpace::kUndefined;
     default:
       ALOGE("Unsupported standard: %d", standard);
       return std::nullopt;
@@ -128,6 +130,8 @@ std::optional<BufferSampleRange> AidlToSampleRange(
       return BufferSampleRange::kFullRange;
     case static_cast<int32_t>(common::Dataspace::RANGE_LIMITED):
       return BufferSampleRange::kLimitedRange;
+    case static_cast<int32_t>(common::Dataspace::UNKNOWN):
+      return BufferSampleRange::kUndefined;
     default:
       ALOGE("Unsupported sample range: %d", sample_range);
       return std::nullopt;
@@ -603,11 +607,16 @@ void ComposerClient::ExecuteDisplayCommand(const DisplayCommand& command) {
     return;
   }
 
+  if (command.brightness) {
+    // TODO: Implement support for display brightness.
+    cmd_result_writer_->AddError(hwc3::Error::kUnsupported);
+    return;
+  }
+
   for (const auto& layer_cmd : command.layers) {
     DispatchLayerCommand(command.display, layer_cmd);
   }
 
-  // TODO: Implement support for display brightness.
   if (command.colorTransformMatrix) {
     ExecuteSetDisplayColorTransform(command.display,
                                     *command.colorTransformMatrix);
@@ -650,7 +659,7 @@ ndk::ScopedAStatus ComposerClient::executeCommands(
 }
 
 ndk::ScopedAStatus ComposerClient::getActiveConfig(int64_t display_id,
-                                                   int32_t* config) {
+                                                   int32_t* config_id) {
   DEBUG_FUNC();
   const std::unique_lock lock(hwc_->GetResMan().GetMainLock());
   HwcDisplay* display = GetDisplay(display_id);
@@ -658,13 +667,12 @@ ndk::ScopedAStatus ComposerClient::getActiveConfig(int64_t display_id,
     return ToBinderStatus(hwc3::Error::kBadDisplay);
   }
 
-  uint32_t hwc2_config = 0;
-  const hwc3::Error error = Hwc2toHwc3Error(
-      display->GetActiveConfig(&hwc2_config));
-  if (error != hwc3::Error::kNone) {
-    return ToBinderStatus(error);
+  const HwcDisplayConfig* config = display->GetLastRequestedConfig();
+  if (config == nullptr) {
+    return ToBinderStatus(hwc3::Error::kBadConfig);
   }
-  *config = Hwc2ConfigIdToHwc3(hwc2_config);
+
+  *config_id = Hwc2ConfigIdToHwc3(config->id);
   return ndk::ScopedAStatus::ok();
 }
 
@@ -887,14 +895,15 @@ ndk::ScopedAStatus ComposerClient::getDisplayVsyncPeriod(
     return ToBinderStatus(hwc3::Error::kBadDisplay);
   }
 
-  uint32_t hwc2_vsync_period = 0;
-  auto error = Hwc2toHwc3Error(
-      display->GetDisplayVsyncPeriod(&hwc2_vsync_period));
-  if (error != hwc3::Error::kNone) {
-    return ToBinderStatus(error);
+  // getDisplayVsyncPeriod should return the vsync period of the config that
+  // is currently committed to the kernel. If a config change is pending due to
+  // setActiveConfigWithConstraints, return the pre-change vsync period.
+  const HwcDisplayConfig* config = display->GetCurrentConfig();
+  if (config == nullptr) {
+    return ToBinderStatus(hwc3::Error::kBadConfig);
   }
 
-  *vsync_period = static_cast<int32_t>(hwc2_vsync_period);
+  *vsync_period = config->mode.GetVSyncPeriodNs();
   return ndk::ScopedAStatus::ok();
 }
 
@@ -1055,13 +1064,14 @@ ndk::ScopedAStatus ComposerClient::registerCallback(
 ndk::ScopedAStatus ComposerClient::setActiveConfig(int64_t display_id,
                                                    int32_t config) {
   DEBUG_FUNC();
-  const std::unique_lock lock(hwc_->GetResMan().GetMainLock());
-  HwcDisplay* display = GetDisplay(display_id);
-  if (display == nullptr) {
-    return ToBinderStatus(hwc3::Error::kBadDisplay);
-  }
 
-  return ToBinderStatus(Hwc2toHwc3Error(display->SetActiveConfig(config)));
+  VsyncPeriodChangeTimeline timeline;
+  VsyncPeriodChangeConstraints constraints = {
+      .desiredTimeNanos = ::android::ResourceManager::GetTimeMonotonicNs(),
+      .seamlessRequired = false,
+  };
+  return setActiveConfigWithConstraints(display_id, config, constraints,
+                                        &timeline);
 }
 
 ndk::ScopedAStatus ComposerClient::setActiveConfigWithConstraints(
@@ -1075,23 +1085,24 @@ ndk::ScopedAStatus ComposerClient::setActiveConfigWithConstraints(
     return ToBinderStatus(hwc3::Error::kBadDisplay);
   }
 
-  hwc_vsync_period_change_constraints_t hwc2_constraints;
-  hwc2_constraints.desiredTimeNanos = constraints.desiredTimeNanos;
-  hwc2_constraints.seamlessRequired = static_cast<uint8_t>(
-      constraints.seamlessRequired);
+  ::QueuedConfigTiming timing{};
+  HwcDisplay::ConfigError
+      result = display->QueueConfig(config, constraints.desiredTimeNanos,
+                                    constraints.seamlessRequired, &timing);
+  timeline->newVsyncAppliedTimeNanos = timing.new_vsync_time_ns;
+  timeline->refreshTimeNanos = timing.refresh_time_ns;
+  timeline->refreshRequired = true;
 
-  hwc_vsync_period_change_timeline_t hwc2_timeline{};
-  auto error = Hwc2toHwc3Error(
-      display->SetActiveConfigWithConstraints(config, &hwc2_constraints,
-                                              &hwc2_timeline));
-  if (error != hwc3::Error::kNone) {
-    return ToBinderStatus(error);
+  switch (result) {
+    case HwcDisplay::ConfigError::kBadConfig:
+      return ToBinderStatus(hwc3::Error::kBadConfig);
+    case HwcDisplay::ConfigError::kSeamlessNotAllowed:
+      return ToBinderStatus(hwc3::Error::kSeamlessNotAllowed);
+    case HwcDisplay::ConfigError::kSeamlessNotPossible:
+      return ToBinderStatus(hwc3::Error::kSeamlessNotPossible);
+    case HwcDisplay::ConfigError::kNone:
+      return ndk::ScopedAStatus::ok();
   }
-
-  timeline->refreshTimeNanos = hwc2_timeline.refreshTimeNanos;
-  timeline->newVsyncAppliedTimeNanos = hwc2_timeline.newVsyncAppliedTimeNanos;
-  timeline->refreshRequired = static_cast<bool>(hwc2_timeline.refreshRequired);
-  return ndk::ScopedAStatus::ok();
 }
 
 ndk::ScopedAStatus ComposerClient::setBootDisplayConfig(int64_t /*display_id*/,
