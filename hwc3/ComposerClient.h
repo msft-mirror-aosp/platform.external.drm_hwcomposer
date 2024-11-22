@@ -157,6 +157,8 @@ class ComposerClient : public BnComposerClient {
 
   ndk::ScopedAStatus getMaxLayerPictureProfiles(
       int64_t display, int32_t* maxProfiles) override;
+  ndk::ScopedAStatus getLuts(int64_t, const std::vector<Buffer>&,
+                             std::vector<Luts>* out_luts) override;
 
  protected:
   ::ndk::SpAIBinder createBinder() override;
