@@ -1293,6 +1293,11 @@ ndk::ScopedAStatus ComposerClient::notifyExpectedPresent(
   return ToBinderStatus(hwc3::Error::kUnsupported);
 }
 
+ndk::ScopedAStatus ComposerClient::startHdcpNegotiation(
+    int64_t /*display*/, const AidlHdcpLevels& /*levels*/) {
+  return ToBinderStatus(hwc3::Error::kUnsupported);
+}
+
 #endif
 
 ndk::ScopedAStatus ComposerClient::getMaxLayerPictureProfiles(int64_t, int32_t*) {
