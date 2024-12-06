@@ -193,7 +193,7 @@ HwcDisplay::ConfigError HwcDisplay::SetConfig(hwc2_config_t config) {
   const HwcDisplayConfig *current_config = GetCurrentConfig();
 
   const uint32_t width = new_config->mode.GetRawMode().hdisplay;
-  const uint32_t height = new_config->mode.GetRawMode().hdisplay;
+  const uint32_t height = new_config->mode.GetRawMode().vdisplay;
 
   std::optional<LayerData> modeset_layer_data;
   // If a client layer has already been provided, and its size matches the
@@ -231,6 +231,7 @@ HwcDisplay::ConfigError HwcDisplay::SetConfig(hwc2_config_t config) {
 
   ALOGV("Blocking config succeeded.");
   configs_.active_config_id = config;
+  staged_mode_config_id_.reset();
   return ConfigError::kNone;
 }
 
