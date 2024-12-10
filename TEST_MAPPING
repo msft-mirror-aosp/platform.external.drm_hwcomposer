@@ -1,0 +1,12 @@
+{
+  "postsubmit": [
+    {
+      "name": "VtsHalGraphicsComposer3_TargetTest"
+    }
+  ],
+  "desktop-postsubmit": [
+    {
+      "name": "VtsHalGraphicsComposer3_TargetTest"
+    }
+  ]
+}
