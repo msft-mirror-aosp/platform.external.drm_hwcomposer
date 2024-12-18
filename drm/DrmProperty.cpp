@@ -15,13 +15,14 @@
  */
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LOG_TAG "hwc-drm-property"
+#define LOG_TAG "drmhwc"
 
 #include "DrmProperty.h"
 
 #include <xf86drmMode.h>
 
 #include <cerrno>
+#include <cinttypes>
 #include <cstdint>
 #include <string>
 
@@ -123,6 +124,24 @@ auto DrmProperty::AtomicSet(drmModeAtomicReq &pset, uint64_t value) const
     return false;
   }
   return true;
+}
+
+std::optional<std::string> DrmProperty::GetEnumNameFromValue(
+    uint64_t value) const {
+  if (enums_.empty()) {
+    ALOGE("No enum values for property: %s", name_.c_str());
+    return {};
+  }
+
+  for (const auto &it : enums_) {
+    if (it.value == value) {
+      return it.name;
+    }
+  }
+
+  ALOGE("Property '%s' has no matching enum for value: %" PRIu64, name_.c_str(),
+        value);
+  return {};
 }
 
 }  // namespace android

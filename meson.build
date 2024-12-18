@@ -1,7 +1,7 @@
 project(
     'drm_hwcomposer',
     ['c', 'cpp'],
-    version : '2',
+    version : '3',
     license : 'APACHE-2.0',
     meson_version : '>= 0.56',
     default_options : ['buildtype=debugoptimized', 'b_ndebug=if-release', 'c_std=c11', 'cpp_std=c++17', 'cpp_rtti=false']
@@ -16,7 +16,16 @@ src_common = files(
     'backend/Backend.cpp',
     'backend/BackendClient.cpp',
     'utils/fd.cpp',
+    'utils/properties.cpp',
 )
+
+srcs_hwc2_device = [
+    'hwc2_device/hwc2_device.cpp',
+    'hwc2_device/DrmHwcTwo.cpp',
+    'hwc2_device/HwcDisplayConfigs.cpp',
+    'hwc2_device/HwcDisplay.cpp',
+    'hwc2_device/HwcLayer.cpp',
+]
 
 deps = [
     dependency('cutils'),
@@ -27,6 +36,9 @@ deps = [
     dependency('sync'),
     dependency('ui'),
     dependency('utils'),
+    dependency('aidlcommonsupport'),
+    dependency('android.hardware.graphics.composer@2.1-resources'),
+    dependency('android.hardware.graphics.composer@2.2-resources'),
 ]
 
 common_cpp_flags = [
@@ -50,3 +62,4 @@ drmhwc_common = static_library(
 )
 
 subdir('hwc2_device')
+subdir('hwc3')

@@ -14,19 +14,96 @@
  * limitations under the License.
  */
 
-#define LOG_TAG "hwc-display"
+#define LOG_TAG "drmhwc"
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
 
 #include "HwcDisplay.h"
 
-#include "DrmHwcTwo.h"
+#include <cinttypes>
+
+#include <hardware/gralloc.h>
+#include <ui/GraphicBufferAllocator.h>
+#include <ui/GraphicBufferMapper.h>
+#include <ui/PixelFormat.h>
+
 #include "backend/Backend.h"
 #include "backend/BackendManager.h"
 #include "bufferinfo/BufferInfoGetter.h"
+#include "compositor/DisplayInfo.h"
+#include "drm/DrmConnector.h"
+#include "drm/DrmDisplayPipeline.h"
+#include "drm/DrmHwc.h"
 #include "utils/log.h"
 #include "utils/properties.h"
 
+using ::android::DrmDisplayPipeline;
+
 namespace android {
+
+namespace {
+// Allocate a black buffer that can be used for an initial modeset when there.
+// is no appropriate client buffer available to be used.
+// Caller must free the returned buffer with GraphicBufferAllocator::free.
+auto GetModesetBuffer(uint32_t width, uint32_t height) -> buffer_handle_t {
+  constexpr PixelFormat format = PIXEL_FORMAT_RGBA_8888;
+  constexpr uint64_t usage = GRALLOC_USAGE_SW_READ_OFTEN |
+                             GRALLOC_USAGE_SW_WRITE_OFTEN |
+                             GRALLOC_USAGE_HW_COMPOSER | GRALLOC_USAGE_HW_FB;
+
+  constexpr uint32_t layer_count = 1;
+  const std::string name = "drm-hwcomposer";
+
+  buffer_handle_t handle = nullptr;
+  uint32_t stride = 0;
+  status_t status = GraphicBufferAllocator::get().allocate(width, height,
+                                                           format, layer_count,
+                                                           usage, &handle,
+                                                           &stride, name);
+  if (status != OK) {
+    ALOGE("Failed to allocate modeset buffer.");
+    return nullptr;
+  }
+
+  void *data = nullptr;
+  Rect bounds = {0, 0, static_cast<int32_t>(width),
+                 static_cast<int32_t>(height)};
+  status = GraphicBufferMapper::get().lock(handle, usage, bounds, &data);
+  if (status != OK) {
+    ALOGE("Failed to map modeset buffer.");
+    GraphicBufferAllocator::get().free(handle);
+    return nullptr;
+  }
+
+  // Cast one of the multiplicands to ensure that the multiplication happens
+  // in a wider type (size_t).
+  const size_t buffer_size = static_cast<size_t>(height) * stride *
+                             bytesPerPixel(format);
+  memset(data, 0, buffer_size);
+  status = GraphicBufferMapper::get().unlock(handle);
+  ALOGW_IF(status != OK, "Failed to unmap buffer.");
+  return handle;
+}
+
+auto GetModesetLayerProperties(buffer_handle_t buffer, uint32_t width,
+                               uint32_t height) -> HwcLayer::LayerProperties {
+  HwcLayer::LayerProperties properties;
+  properties.buffer = {.buffer_handle = buffer, .acquire_fence = {}};
+  properties.display_frame = {
+      .left = 0,
+      .top = 0,
+      .right = int(width),
+      .bottom = int(height),
+  };
+  properties.source_crop = (hwc_frect_t){
+      .left = 0.0F,
+      .top = 0.0F,
+      .right = static_cast<float>(width),
+      .bottom = static_cast<float>(height),
+  };
+  properties.blend_mode = BufferBlendMode::kNone;
+  return properties;
+}
+}  // namespace
 
 std::string HwcDisplay::DumpDelta(HwcDisplay::Stats delta) {
   if (delta.total_pixops_ == 0)
@@ -66,14 +143,14 @@ std::string HwcDisplay::Dump() {
 }
 
 HwcDisplay::HwcDisplay(hwc2_display_t handle, HWC2::DisplayType type,
-                       DrmHwcTwo *hwc2)
-    : hwc2_(hwc2), handle_(handle), type_(type), client_layer_(this) {
+                       DrmHwc *hwc)
+    : hwc_(hwc), handle_(handle), type_(type), client_layer_(this) {
   if (type_ == HWC2::DisplayType::Virtual) {
     writeback_layer_ = std::make_unique<HwcLayer>(this);
   }
 }
 
-void HwcDisplay::SetColorMarixToIdentity() {
+void HwcDisplay::SetColorMatrixToIdentity() {
   color_matrix_ = std::make_shared<drm_color_ctm>();
   for (int i = 0; i < kCtmCols; i++) {
     for (int j = 0; j < kCtmRows; j++) {
@@ -85,7 +162,113 @@ void HwcDisplay::SetColorMarixToIdentity() {
   color_transform_hint_ = HAL_COLOR_TRANSFORM_IDENTITY;
 }
 
-HwcDisplay::~HwcDisplay() = default;
+HwcDisplay::~HwcDisplay() {
+  Deinit();
+};
+
+auto HwcDisplay::GetConfig(hwc2_config_t config_id) const
+    -> const HwcDisplayConfig * {
+  auto config_iter = configs_.hwc_configs.find(config_id);
+  if (config_iter == configs_.hwc_configs.end()) {
+    return nullptr;
+  }
+  return &config_iter->second;
+}
+
+auto HwcDisplay::GetCurrentConfig() const -> const HwcDisplayConfig * {
+  return GetConfig(configs_.active_config_id);
+}
+
+auto HwcDisplay::GetLastRequestedConfig() const -> const HwcDisplayConfig * {
+  return GetConfig(staged_mode_config_id_.value_or(configs_.active_config_id));
+}
+
+HwcDisplay::ConfigError HwcDisplay::SetConfig(hwc2_config_t config) {
+  const HwcDisplayConfig *new_config = GetConfig(config);
+  if (new_config == nullptr) {
+    ALOGE("Could not find active mode for %u", config);
+    return ConfigError::kBadConfig;
+  }
+
+  const HwcDisplayConfig *current_config = GetCurrentConfig();
+
+  const uint32_t width = new_config->mode.GetRawMode().hdisplay;
+  const uint32_t height = new_config->mode.GetRawMode().vdisplay;
+
+  std::optional<LayerData> modeset_layer_data;
+  // If a client layer has already been provided, and its size matches the
+  // new config, use it for the modeset.
+  if (client_layer_.IsLayerUsableAsDevice() && current_config &&
+      current_config->mode.GetRawMode().hdisplay == width &&
+      current_config->mode.GetRawMode().vdisplay == height) {
+    ALOGV("Use existing client_layer for blocking config.");
+    modeset_layer_data = client_layer_.GetLayerData();
+  } else {
+    ALOGV("Allocate modeset buffer.");
+    buffer_handle_t modeset_buffer = GetModesetBuffer(width, height);
+    if (modeset_buffer != nullptr) {
+      auto modeset_layer = std::make_unique<HwcLayer>(this);
+      modeset_layer->SetLayerProperties(
+          GetModesetLayerProperties(modeset_buffer, width, height));
+      modeset_layer->PopulateLayerData();
+      modeset_layer_data = modeset_layer->GetLayerData();
+      GraphicBufferAllocator::get().free(modeset_buffer);
+    }
+  }
+
+  ALOGV("Create modeset commit.");
+  // Create atomic commit args for a blocking modeset. There's no need to do a
+  // separate test commit, since the commit does a test anyways.
+  AtomicCommitArgs commit_args = CreateModesetCommit(new_config,
+                                                     modeset_layer_data);
+  commit_args.blocking = true;
+  int ret = GetPipe().atomic_state_manager->ExecuteAtomicCommit(commit_args);
+
+  if (ret) {
+    ALOGE("Blocking config failed: %d", ret);
+    return HwcDisplay::ConfigError::kBadConfig;
+  }
+
+  ALOGV("Blocking config succeeded.");
+  configs_.active_config_id = config;
+  staged_mode_config_id_.reset();
+  return ConfigError::kNone;
+}
+
+auto HwcDisplay::QueueConfig(hwc2_config_t config, int64_t desired_time,
+                             bool seamless, QueuedConfigTiming *out_timing)
+    -> ConfigError {
+  if (configs_.hwc_configs.count(config) == 0) {
+    ALOGE("Could not find active mode for %u", config);
+    return ConfigError::kBadConfig;
+  }
+
+  // TODO: Add support for seamless configuration changes.
+  if (seamless) {
+    return ConfigError::kSeamlessNotAllowed;
+  }
+
+  // Request a refresh from the client one vsync period before the desired
+  // time, or simply at the desired time if there is no active configuration.
+  const HwcDisplayConfig *current_config = GetCurrentConfig();
+  out_timing->refresh_time_ns = desired_time -
+                                (current_config
+                                     ? current_config->mode.GetVSyncPeriodNs()
+                                     : 0);
+  out_timing->new_vsync_time_ns = desired_time;
+
+  // Queue the config change timing to be consistent with the requested
+  // refresh time.
+  staged_mode_change_time_ = out_timing->refresh_time_ns;
+  staged_mode_config_id_ = config;
+
+  // Enable vsync events until the mode has been applied.
+  last_vsync_ts_ = 0;
+  vsync_tracking_en_ = true;
+  vsync_worker_->VSyncControl(true);
+
+  return ConfigError::kNone;
+}
 
 void HwcDisplay::SetPipeline(std::shared_ptr<DrmDisplayPipeline> pipeline) {
   Deinit();
@@ -94,9 +277,9 @@ void HwcDisplay::SetPipeline(std::shared_ptr<DrmDisplayPipeline> pipeline) {
 
   if (pipeline_ != nullptr || handle_ == kPrimaryDisplay) {
     Init();
-    hwc2_->ScheduleHotplugEvent(handle_, /*connected = */ true);
+    hwc_->ScheduleHotplugEvent(handle_, DrmHwc::kConnected);
   } else {
-    hwc2_->ScheduleHotplugEvent(handle_, /*connected = */ false);
+    hwc_->ScheduleHotplugEvent(handle_, DrmHwc::kDisconnected);
   }
 }
 
@@ -105,22 +288,9 @@ void HwcDisplay::Deinit() {
     AtomicCommitArgs a_args{};
     a_args.composition = std::make_shared<DrmKmsPlan>();
     GetPipe().atomic_state_manager->ExecuteAtomicCommit(a_args);
-/*
- *  TODO:
- *  Unfortunately the following causes regressions on db845c
- *  with VtsHalGraphicsComposerV2_3TargetTest due to the display
- *  never coming back. Patches to avoiding that issue on the
- *  the kernel side unfortunately causes further crashes in
- *  drm_hwcomposer, because the client detach takes longer then the
- *  1 second max VTS expects. So for now as a workaround, lets skip
- *  deactivating the display on deinit, which matches previous
- *  behavior prior to commit d0494d9b8097
- */
-#if 0
     a_args.composition = {};
     a_args.active = false;
     GetPipe().atomic_state_manager->ExecuteAtomicCommit(a_args);
-#endif
 
     current_plan_.reset();
     backend_.reset();
@@ -131,6 +301,8 @@ void HwcDisplay::Deinit() {
   }
 
   if (vsync_worker_) {
+    // TODO: There should be a mechanism to wait for this worker to complete,
+    // otherwise there is a race condition while destructing the HwcDisplay.
     vsync_worker_->StopThread();
     vsync_worker_ = {};
   }
@@ -144,11 +316,11 @@ HWC2::Error HwcDisplay::Init() {
   auto vsw_callbacks = (VSyncWorkerCallbacks){
       .out_event =
           [this](int64_t timestamp) {
-            const std::unique_lock lock(hwc2_->GetResMan().GetMainLock());
+            const std::unique_lock lock(hwc_->GetResMan().GetMainLock());
             if (vsync_event_en_) {
               uint32_t period_ns{};
               GetDisplayVsyncPeriod(&period_ns);
-              hwc2_->SendVsyncEventToClient(handle_, timestamp, period_ns);
+              hwc_->SendVsyncEventToClient(handle_, timestamp, period_ns);
             }
             if (vsync_tracking_en_) {
               last_vsync_ts_ = timestamp;
@@ -178,20 +350,33 @@ HWC2::Error HwcDisplay::Init() {
       ALOGE("Failed to set backend for d=%d %d\n", int(handle_), ret);
       return HWC2::Error::BadDisplay;
     }
-    auto flatcbk = (struct FlatConCallbacks){.trigger = [this]() {
-      if (hwc2_->refresh_callback_.first != nullptr &&
-          hwc2_->refresh_callback_.second != nullptr)
-        hwc2_->refresh_callback_.first(hwc2_->refresh_callback_.second,
-                                       handle_);
-    }};
+    auto flatcbk = (struct FlatConCallbacks){
+        .trigger = [this]() { hwc_->SendRefreshEventToClient(handle_); }};
     flatcon_ = FlatteningController::CreateInstance(flatcbk);
   }
 
   client_layer_.SetLayerBlendMode(HWC2_BLEND_MODE_PREMULTIPLIED);
 
-  SetColorMarixToIdentity();
+  SetColorMatrixToIdentity();
 
   return HWC2::Error::None;
+}
+
+std::optional<PanelOrientation> HwcDisplay::getDisplayPhysicalOrientation() {
+  if (IsInHeadlessMode()) {
+    // The pipeline can be nullptr in headless mode, so return the default
+    // "normal" mode.
+    return PanelOrientation::kModePanelOrientationNormal;
+  }
+
+  DrmDisplayPipeline &pipeline = GetPipe();
+  if (pipeline.connector == nullptr || pipeline.connector->Get() == nullptr) {
+    ALOGW(
+        "No display pipeline present to query the panel orientation property.");
+    return {};
+  }
+
+  return pipeline.connector->Get()->GetPanelOrientation();
 }
 
 HWC2::Error HwcDisplay::ChosePreferredConfig() {
@@ -233,10 +418,12 @@ HWC2::Error HwcDisplay::DestroyLayer(hwc2_layer_t layer) {
 }
 
 HWC2::Error HwcDisplay::GetActiveConfig(hwc2_config_t *config) const {
-  if (configs_.hwc_configs.count(staged_mode_config_id_) == 0)
+  // If a config has been queued, it is considered the "active" config.
+  const HwcDisplayConfig *hwc_config = GetLastRequestedConfig();
+  if (hwc_config == nullptr)
     return HWC2::Error::BadConfig;
 
-  *config = staged_mode_config_id_;
+  *config = hwc_config->id;
   return HWC2::Error::None;
 }
 
@@ -310,7 +497,6 @@ HWC2::Error HwcDisplay::GetDisplayAttribute(hwc2_config_t config,
 
   static const int32_t kUmPerInch = 25400;
   auto mm_width = configs_.mm_width;
-  auto mm_height = configs_.mm_height;
   auto attribute = static_cast<HWC2::Attribute>(attribute_in);
   switch (attribute) {
     case HWC2::Attribute::Width:
@@ -321,19 +507,18 @@ HWC2::Error HwcDisplay::GetDisplayAttribute(hwc2_config_t config,
       break;
     case HWC2::Attribute::VsyncPeriod:
       // in nanoseconds
-      *value = static_cast<int>(1E9 / hwc_config.mode.GetVRefresh());
+      *value = hwc_config.mode.GetVSyncPeriodNs();
       break;
+    case HWC2::Attribute::DpiY:
+      // ideally this should be vdisplay/mm_heigth, however mm_height
+      // comes from edid parsing and is highly unreliable. Viewing the
+      // rarity of anisotropic displays, falling back to a single value
+      // for dpi yield more correct output.
     case HWC2::Attribute::DpiX:
       // Dots per 1000 inches
       *value = mm_width ? int(hwc_config.mode.GetRawMode().hdisplay *
                               kUmPerInch / mm_width)
                         : -1;
-      break;
-    case HWC2::Attribute::DpiY:
-      // Dots per 1000 inches
-      *value = mm_height ? int(hwc_config.mode.GetRawMode().vdisplay *
-                               kUmPerInch / mm_height)
-                         : -1;
       break;
 #if __ANDROID_API__ > 29
     case HWC2::Attribute::ConfigGroup:
@@ -349,8 +534,8 @@ HWC2::Error HwcDisplay::GetDisplayAttribute(hwc2_config_t config,
   return HWC2::Error::None;
 }
 
-HWC2::Error HwcDisplay::GetDisplayConfigs(uint32_t *num_configs,
-                                          hwc2_config_t *configs) {
+HWC2::Error HwcDisplay::LegacyGetDisplayConfigs(uint32_t *num_configs,
+                                                hwc2_config_t *configs) {
   uint32_t idx = 0;
   for (auto &hwc_config : configs_.hwc_configs) {
     if (hwc_config.second.disabled) {
@@ -457,6 +642,34 @@ HWC2::Error HwcDisplay::GetReleaseFences(uint32_t *num_elements,
   return HWC2::Error::None;
 }
 
+AtomicCommitArgs HwcDisplay::CreateModesetCommit(
+    const HwcDisplayConfig *config,
+    const std::optional<LayerData> &modeset_layer) {
+  AtomicCommitArgs args{};
+
+  args.color_matrix = color_matrix_;
+  args.content_type = content_type_;
+  args.colorspace = colorspace_;
+
+  std::vector<LayerData> composition_layers;
+  if (modeset_layer) {
+    composition_layers.emplace_back(modeset_layer.value());
+  }
+
+  if (composition_layers.empty()) {
+    ALOGW("Attempting to create a modeset commit without a layer.");
+  }
+
+  args.display_mode = config->mode;
+  args.active = true;
+  args.composition = DrmKmsPlan::CreateDrmKmsPlan(GetPipe(),
+                                                  std::move(
+                                                      composition_layers));
+  ALOGW_IF(!args.composition, "No composition for blocking modeset");
+
+  return args;
+}
+
 HWC2::Error HwcDisplay::CreateComposition(AtomicCommitArgs &a_args) {
   if (IsInHeadlessMode()) {
     ALOGE("%s: Display is in headless mode, should never reach here", __func__);
@@ -464,22 +677,29 @@ HWC2::Error HwcDisplay::CreateComposition(AtomicCommitArgs &a_args) {
   }
 
   a_args.color_matrix = color_matrix_;
+  a_args.content_type = content_type_;
+  a_args.colorspace = colorspace_;
 
   uint32_t prev_vperiod_ns = 0;
   GetDisplayVsyncPeriod(&prev_vperiod_ns);
 
   auto mode_update_commited_ = false;
-  if (staged_mode_ &&
+  if (staged_mode_config_id_ &&
       staged_mode_change_time_ <= ResourceManager::GetTimeMonotonicNs()) {
+    const HwcDisplayConfig *staged_config = GetConfig(
+        staged_mode_config_id_.value());
+    if (staged_config == nullptr) {
+      return HWC2::Error::BadConfig;
+    }
     client_layer_.SetLayerDisplayFrame(
         (hwc_rect_t){.left = 0,
                      .top = 0,
-                     .right = int(staged_mode_->GetRawMode().hdisplay),
-                     .bottom = int(staged_mode_->GetRawMode().vdisplay)});
+                     .right = int(staged_config->mode.GetRawMode().hdisplay),
+                     .bottom = int(staged_config->mode.GetRawMode().vdisplay)});
 
-    configs_.active_config_id = staged_mode_config_id_;
+    configs_.active_config_id = staged_mode_config_id_.value();
 
-    a_args.display_mode = *staged_mode_;
+    a_args.display_mode = staged_config->mode;
     if (!a_args.test_only) {
       mode_update_commited_ = true;
     }
@@ -544,9 +764,7 @@ HWC2::Error HwcDisplay::CreateComposition(AtomicCommitArgs &a_args) {
   }
 
   if (!current_plan_) {
-    if (!a_args.test_only) {
-      ALOGE("Failed to create DrmKmsPlan");
-    }
+    ALOGE_IF(!a_args.test_only, "Failed to create DrmKmsPlan");
     return HWC2::Error::BadConfig;
   }
 
@@ -555,18 +773,17 @@ HWC2::Error HwcDisplay::CreateComposition(AtomicCommitArgs &a_args) {
   auto ret = GetPipe().atomic_state_manager->ExecuteAtomicCommit(a_args);
 
   if (ret) {
-    if (!a_args.test_only)
-      ALOGE("Failed to apply the frame composition ret=%d", ret);
+    ALOGE_IF(!a_args.test_only, "Failed to apply the frame composition ret=%d", ret);
     return HWC2::Error::BadParameter;
   }
 
   if (mode_update_commited_) {
-    staged_mode_.reset();
+    staged_mode_config_id_.reset();
     vsync_tracking_en_ = false;
     if (last_vsync_ts_ != 0) {
-      hwc2_->SendVsyncPeriodTimingChangedEventToClient(handle_,
-                                                       last_vsync_ts_ +
-                                                           prev_vperiod_ns);
+      hwc_->SendVsyncPeriodTimingChangedEventToClient(handle_,
+                                                      last_vsync_ts_ +
+                                                          prev_vperiod_ns);
     }
   }
 
@@ -606,6 +823,7 @@ HWC2::Error HwcDisplay::PresentDisplay(int32_t *out_present_fence) {
   color_matrix_ = {};
 
   ++frame_no_;
+
   return HWC2::Error::None;
 }
 
@@ -616,7 +834,6 @@ HWC2::Error HwcDisplay::SetActiveConfigInternal(uint32_t config,
     return HWC2::Error::BadConfig;
   }
 
-  staged_mode_ = configs_.hwc_configs[config].mode;
   staged_mode_change_time_ = change_time;
   staged_mode_config_id_ = config;
 
@@ -673,17 +890,50 @@ HWC2::Error HwcDisplay::SetClientTarget(buffer_handle_t target,
 }
 
 HWC2::Error HwcDisplay::SetColorMode(int32_t mode) {
-  if (mode < HAL_COLOR_MODE_NATIVE || mode > HAL_COLOR_MODE_BT2100_HLG)
+  /* Maps to the Colorspace DRM connector property:
+   * https://elixir.bootlin.com/linux/v6.11/source/include/drm/drm_connector.h#L538
+   */
+  if (mode < HAL_COLOR_MODE_NATIVE || mode > HAL_COLOR_MODE_DISPLAY_P3)
     return HWC2::Error::BadParameter;
 
-  if (mode != HAL_COLOR_MODE_NATIVE)
-    return HWC2::Error::Unsupported;
+  switch (mode) {
+    case HAL_COLOR_MODE_NATIVE:
+      colorspace_ = Colorspace::kDefault;
+      break;
+    case HAL_COLOR_MODE_STANDARD_BT601_625:
+    case HAL_COLOR_MODE_STANDARD_BT601_625_UNADJUSTED:
+    case HAL_COLOR_MODE_STANDARD_BT601_525:
+    case HAL_COLOR_MODE_STANDARD_BT601_525_UNADJUSTED:
+      // The DP spec does not say whether this is the 525 or the 625 line version.
+      colorspace_ = Colorspace::kBt601Ycc;
+      break;
+    case HAL_COLOR_MODE_STANDARD_BT709:
+    case HAL_COLOR_MODE_SRGB:
+      colorspace_ = Colorspace::kBt709Ycc;
+      break;
+    case HAL_COLOR_MODE_DCI_P3:
+    case HAL_COLOR_MODE_DISPLAY_P3:
+      colorspace_ = Colorspace::kDciP3RgbD65;
+      break;
+    case HAL_COLOR_MODE_ADOBE_RGB:
+    default:
+      return HWC2::Error::Unsupported;
+  }
 
   color_mode_ = mode;
   return HWC2::Error::None;
 }
 
 #include <xf86drmMode.h>
+
+static uint64_t To3132FixPt(float in) {
+  constexpr uint64_t kSignMask = (1ULL << 63);
+  constexpr uint64_t kValueMask = ~(1ULL << 63);
+  constexpr auto kValueScale = static_cast<float>(1ULL << 32);
+  if (in < 0)
+    return (static_cast<uint64_t>(-in * kValueScale) & kValueMask) | kSignMask;
+  return static_cast<uint64_t>(in * kValueScale) & kValueMask;
+}
 
 HWC2::Error HwcDisplay::SetColorTransform(const float *matrix, int32_t hint) {
   if (hint < HAL_COLOR_TRANSFORM_IDENTITY ||
@@ -703,17 +953,40 @@ HWC2::Error HwcDisplay::SetColorTransform(const float *matrix, int32_t hint) {
 
   switch (color_transform_hint_) {
     case HAL_COLOR_TRANSFORM_IDENTITY:
-      SetColorMarixToIdentity();
+      SetColorMatrixToIdentity();
       break;
     case HAL_COLOR_TRANSFORM_ARBITRARY_MATRIX:
+      // Without HW support, we cannot correctly process matrices with an offset.
+      for (int i = 12; i < 14; i++) {
+        if (matrix[i] != 0.F)
+          return HWC2::Error::Unsupported;
+      }
+
+      /* HAL provides a 4x4 float type matrix:
+       * | 0  1  2  3|
+       * | 4  5  6  7|
+       * | 8  9 10 11|
+       * |12 13 14 15|
+       *
+       * R_out = R*0 + G*4 + B*8 + 12
+       * G_out = R*1 + G*5 + B*9 + 13
+       * B_out = R*2 + G*6 + B*10 + 14
+       *
+       * DRM expects a 3x3 s31.32 fixed point matrix:
+       * out   matrix    in
+       * |R|   |0 1 2|   |R|
+       * |G| = |3 4 5| x |G|
+       * |B|   |6 7 8|   |B|
+       *
+       * R_out = R*0 + G*1 + B*2
+       * G_out = R*3 + G*4 + B*5
+       * B_out = R*6 + G*7 + B*8
+       */
       color_matrix_ = std::make_shared<drm_color_ctm>();
-      /* DRM expects a 3x3 matrix, but the HAL provides a 4x4 matrix. */
       for (int i = 0; i < kCtmCols; i++) {
         for (int j = 0; j < kCtmRows; j++) {
           constexpr int kInCtmRows = 4;
-          /* HAL matrix type is float, but DRM expects a s31.32 fix point */
-          auto value = uint64_t(matrix[i * kInCtmRows + j] * float(1ULL << 32));
-          color_matrix_->matrix[i * kCtmRows + j] = value;
+          color_matrix_->matrix[i * kCtmRows + j] = To3132FixPt(matrix[j * kInCtmRows + i]);
         }
       }
       break;
@@ -731,7 +1004,7 @@ bool HwcDisplay::CtmByGpu() {
   if (GetPipe().crtc->Get()->GetCtmProperty())
     return false;
 
-  if (GetHwc2()->GetResMan().GetCtmHandling() == CtmHandling::kDrmOrIgnore)
+  if (GetHwc()->GetResMan().GetCtmHandling() == CtmHandling::kDrmOrIgnore)
     return false;
 
   return true;
@@ -918,12 +1191,13 @@ HWC2::Error HwcDisplay::GetSupportedContentTypes(
 }
 
 HWC2::Error HwcDisplay::SetContentType(int32_t contentType) {
-  if (contentType != HWC2_CONTENT_TYPE_NONE)
-    return HWC2::Error::Unsupported;
-
-  /* TODO: Map to the DRM Connector property:
-   * https://elixir.bootlin.com/linux/v5.4-rc5/source/drivers/gpu/drm/drm_connector.c#L809
+  /* Maps exactly to the content_type DRM connector property:
+   * https://elixir.bootlin.com/linux/v6.11/source/include/uapi/drm/drm_mode.h#L107
    */
+  if (contentType < HWC2_CONTENT_TYPE_NONE || contentType > HWC2_CONTENT_TYPE_GAME)
+    return HWC2::Error::BadParameter;
+
+  content_type_ = contentType;
 
   return HWC2::Error::None;
 }
@@ -963,7 +1237,7 @@ HWC2::Error HwcDisplay::GetDisplayCapabilities(uint32_t *outNumCapabilities,
   bool skip_ctm = false;
 
   // Skip client CTM if user requested DRM_OR_IGNORE
-  if (GetHwc2()->GetResMan().GetCtmHandling() == CtmHandling::kDrmOrIgnore)
+  if (GetHwc()->GetResMan().GetCtmHandling() == CtmHandling::kDrmOrIgnore)
     skip_ctm = true;
 
   // Skip client CTM if DRM can handle it
@@ -1018,16 +1292,12 @@ HWC2::Error HwcDisplay::SetColorModeWithIntent(int32_t mode, int32_t intent) {
       intent > HAL_RENDER_INTENT_TONE_MAP_ENHANCE)
     return HWC2::Error::BadParameter;
 
-  if (mode < HAL_COLOR_MODE_NATIVE || mode > HAL_COLOR_MODE_BT2100_HLG)
-    return HWC2::Error::BadParameter;
-
-  if (mode != HAL_COLOR_MODE_NATIVE)
-    return HWC2::Error::Unsupported;
-
   if (intent != HAL_RENDER_INTENT_COLORIMETRIC)
     return HWC2::Error::Unsupported;
 
-  color_mode_ = mode;
+  auto err = SetColorMode(mode);
+  if (err != HWC2::Error::None) return err;
+
   return HWC2::Error::None;
 }
 
