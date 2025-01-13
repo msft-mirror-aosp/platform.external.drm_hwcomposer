@@ -1,12 +1,28 @@
 {
+  "presubmit": [
+    {
+      "name": "VtsHalGraphicsComposer3_TargetTest"
+    }
+  ],
   "postsubmit": [
+    {
+      "name": "CuttlefishDisplayTests"
+    },
+    {
+      "name": "CuttlefishDisplayHotplugTest"
+    }
+  ],
+  "desktop-presubmit": [
     {
       "name": "VtsHalGraphicsComposer3_TargetTest"
     }
   ],
   "desktop-postsubmit": [
     {
-      "name": "VtsHalGraphicsComposer3_TargetTest"
+      "name": "CuttlefishDisplayTests"
+    },
+    {
+      "name": "CuttlefishDisplayHotplugTest"
     }
   ]
 }
