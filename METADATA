@@ -1,3 +1,15 @@
+name: "drm_hwcomposer"
+description: "KMS-based HWComposer implementation."
 third_party {
   license_type: NOTICE
+  last_upgrade_date {
+    year: 2025
+    month: 1
+    day: 14
+  }
+  identifier {
+    type: "Git"
+    value: "https://gitlab.freedesktop.org/drm-hwcomposer/drm-hwcomposer"
+    version: "a29289940d7cf806029a36e2e01667708294c67b"
+  }
 }
