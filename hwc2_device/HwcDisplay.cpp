@@ -21,7 +21,10 @@
 
 #include <cinttypes>
 
+#include <xf86drmMode.h>
+
 #include <hardware/gralloc.h>
+#include <ui/ColorSpace.h>
 #include <ui/GraphicBufferAllocator.h>
 #include <ui/GraphicBufferMapper.h>
 #include <ui/PixelFormat.h>
@@ -37,10 +40,61 @@
 #include "utils/properties.h"
 
 using ::android::DrmDisplayPipeline;
+using ColorGamut = ::android::ColorSpace;
 
 namespace android {
 
 namespace {
+
+constexpr int kCtmRows = 3;
+constexpr int kCtmCols = 3;
+
+constexpr std::array<float, 16> kIdentityMatrix = {
+    1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+    0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F,
+};
+
+uint64_t To3132FixPt(float in) {
+  constexpr uint64_t kSignMask = (1ULL << 63);
+  constexpr uint64_t kValueMask = ~(1ULL << 63);
+  constexpr auto kValueScale = static_cast<float>(1ULL << 32);
+  if (in < 0)
+    return (static_cast<uint64_t>(-in * kValueScale) & kValueMask) | kSignMask;
+  return static_cast<uint64_t>(in * kValueScale) & kValueMask;
+}
+
+auto ToColorTransform(const std::array<float, 16> &color_transform_matrix) {
+  /* HAL provides a 4x4 float type matrix:
+   * | 0  1  2  3|
+   * | 4  5  6  7|
+   * | 8  9 10 11|
+   * |12 13 14 15|
+   *
+   * R_out = R*0 + G*4 + B*8 + 12
+   * G_out = R*1 + G*5 + B*9 + 13
+   * B_out = R*2 + G*6 + B*10 + 14
+   *
+   * DRM expects a 3x3 s31.32 fixed point matrix:
+   * out   matrix    in
+   * |R|   |0 1 2|   |R|
+   * |G| = |3 4 5| x |G|
+   * |B|   |6 7 8|   |B|
+   *
+   * R_out = R*0 + G*1 + B*2
+   * G_out = R*3 + G*4 + B*5
+   * B_out = R*6 + G*7 + B*8
+   */
+  auto color_matrix = std::make_shared<drm_color_ctm>();
+  for (int i = 0; i < kCtmCols; i++) {
+    for (int j = 0; j < kCtmRows; j++) {
+      constexpr int kInCtmRows = 4;
+      color_matrix->matrix[(i * kCtmRows) + j] = To3132FixPt(
+          color_transform_matrix[(j * kInCtmRows) + i]);
+    }
+  }
+  return color_matrix;
+}
+
 // Allocate a black buffer that can be used for an initial modeset when there.
 // is no appropriate client buffer available to be used.
 // Caller must free the returned buffer with GraphicBufferAllocator::free.
@@ -105,10 +159,38 @@ auto GetModesetLayerProperties(buffer_handle_t buffer, uint32_t width,
 }
 }  // namespace
 
+static BufferColorSpace Hwc2ToColorSpace(int32_t dataspace) {
+  switch (dataspace & HAL_DATASPACE_STANDARD_MASK) {
+    case HAL_DATASPACE_STANDARD_BT709:
+      return BufferColorSpace::kItuRec709;
+    case HAL_DATASPACE_STANDARD_BT601_625:
+    case HAL_DATASPACE_STANDARD_BT601_625_UNADJUSTED:
+    case HAL_DATASPACE_STANDARD_BT601_525:
+    case HAL_DATASPACE_STANDARD_BT601_525_UNADJUSTED:
+      return BufferColorSpace::kItuRec601;
+    case HAL_DATASPACE_STANDARD_BT2020:
+    case HAL_DATASPACE_STANDARD_BT2020_CONSTANT_LUMINANCE:
+      return BufferColorSpace::kItuRec2020;
+    default:
+      return BufferColorSpace::kUndefined;
+  }
+}
+
+static BufferSampleRange Hwc2ToSampleRange(int32_t dataspace) {
+  switch (dataspace & HAL_DATASPACE_RANGE_MASK) {
+    case HAL_DATASPACE_RANGE_FULL:
+      return BufferSampleRange::kFullRange;
+    case HAL_DATASPACE_RANGE_LIMITED:
+      return BufferSampleRange::kLimitedRange;
+    default:
+      return BufferSampleRange::kUndefined;
+  }
+}
+
 std::string HwcDisplay::DumpDelta(HwcDisplay::Stats delta) {
   if (delta.total_pixops_ == 0)
     return "No stats yet";
-  auto ratio = 1.0 - double(delta.gpu_pixops_) / double(delta.total_pixops_);
+  auto ratio = 1.0 - (double(delta.gpu_pixops_) / double(delta.total_pixops_));
 
   std::stringstream ss;
   ss << " Total frames count: " << delta.total_frames_ << "\n"
@@ -150,12 +232,30 @@ HwcDisplay::HwcDisplay(hwc2_display_t handle, HWC2::DisplayType type,
   }
 }
 
+void HwcDisplay::SetColorTransformMatrix(
+    const std::array<float, 16> &color_transform_matrix) {
+  auto almost_equal = [](auto a, auto b) {
+    const float epsilon = 0.001F;
+    return std::abs(a - b) < epsilon;
+  };
+  const bool is_identity = std::equal(color_transform_matrix.begin(),
+                                      color_transform_matrix.end(),
+                                      kIdentityMatrix.begin(), almost_equal);
+  color_transform_hint_ = is_identity ? HAL_COLOR_TRANSFORM_IDENTITY
+                                      : HAL_COLOR_TRANSFORM_ARBITRARY_MATRIX;
+  if (color_transform_hint_ == is_identity) {
+    SetColorMatrixToIdentity();
+  } else {
+    color_matrix_ = ToColorTransform(color_transform_matrix);
+  }
+}
+
 void HwcDisplay::SetColorMatrixToIdentity() {
   color_matrix_ = std::make_shared<drm_color_ctm>();
   for (int i = 0; i < kCtmCols; i++) {
     for (int j = 0; j < kCtmRows; j++) {
       constexpr uint64_t kOne = (1ULL << 32); /* 1.0 in s31.32 format */
-      color_matrix_->matrix[i * kCtmRows + j] = (i == j) ? kOne : 0;
+      color_matrix_->matrix[(i * kCtmRows) + j] = (i == j) ? kOne : 0;
     }
   }
 
@@ -270,6 +370,68 @@ auto HwcDisplay::QueueConfig(hwc2_config_t config, int64_t desired_time,
   return ConfigError::kNone;
 }
 
+auto HwcDisplay::ValidateStagedComposition() -> std::vector<ChangedLayer> {
+  if (IsInHeadlessMode()) {
+    return {};
+  }
+
+  /* In current drm_hwc design in case previous frame layer was not validated as
+   * a CLIENT, it is used by display controller (Front buffer). We have to store
+   * this state to provide the CLIENT with the release fences for such buffers.
+   */
+  for (auto &l : layers_) {
+    l.second.SetPriorBufferScanOutFlag(l.second.GetValidatedType() !=
+                                       HWC2::Composition::Client);
+  }
+
+  // ValidateDisplay returns the number of layers that may be changed.
+  uint32_t num_types = 0;
+  uint32_t num_requests = 0;
+  backend_->ValidateDisplay(this, &num_types, &num_requests);
+
+  if (num_types == 0) {
+    return {};
+  }
+
+  // Iterate through the layers to find which layers actually changed.
+  std::vector<ChangedLayer> changed_layers;
+  for (auto &l : layers_) {
+    if (l.second.IsTypeChanged()) {
+      changed_layers.emplace_back(l.first, l.second.GetValidatedType());
+    }
+  }
+  return changed_layers;
+}
+
+auto HwcDisplay::AcceptValidatedComposition() -> void {
+  for (std::pair<const hwc2_layer_t, HwcLayer> &l : layers_) {
+    l.second.AcceptTypeChange();
+  }
+}
+
+auto HwcDisplay::PresentStagedComposition(
+    SharedFd &out_present_fence, std::vector<ReleaseFence> &out_release_fences)
+    -> bool {
+  int out_fd = -1;
+  auto error = PresentDisplay(&out_fd);
+  out_present_fence = MakeSharedFd(out_fd);
+  if (error != HWC2::Error::None) {
+    return false;
+  }
+
+  if (!out_present_fence) {
+    return true;
+  }
+
+  for (auto &l : layers_) {
+    if (l.second.GetPriorBufferScanOutFlag()) {
+      out_release_fences.emplace_back(l.first, out_present_fence);
+    }
+  }
+
+  return true;
+}
+
 void HwcDisplay::SetPipeline(std::shared_ptr<DrmDisplayPipeline> pipeline) {
   Deinit();
 
@@ -330,7 +492,9 @@ HWC2::Error HwcDisplay::Init() {
     flatcon_ = FlatteningController::CreateInstance(flatcbk);
   }
 
-  client_layer_.SetLayerBlendMode(HWC2_BLEND_MODE_PREMULTIPLIED);
+  HwcLayer::LayerProperties lp;
+  lp.blend_mode = BufferBlendMode::kPreMult;
+  client_layer_.SetLayerProperties(lp);
 
   SetColorMatrixToIdentity();
 
@@ -449,11 +613,23 @@ HWC2::Error HwcDisplay::GetClientTargetSupport(uint32_t width, uint32_t height,
 }
 
 HWC2::Error HwcDisplay::GetColorModes(uint32_t *num_modes, int32_t *modes) {
-  if (!modes)
-    *num_modes = 1;
+  if (!modes) {
+    std::vector<Colormode> temp_modes;
+    GetEdid()->GetColorModes(temp_modes);
+    *num_modes = temp_modes.size();
+    return HWC2::Error::None;
+  }
 
-  if (modes)
-    *modes = HAL_COLOR_MODE_NATIVE;
+  std::vector<Colormode> temp_modes;
+  std::vector<int32_t> out_modes(modes, modes + *num_modes);
+  GetEdid()->GetColorModes(temp_modes);
+  if (temp_modes.empty()) {
+    out_modes.emplace_back(HAL_COLOR_MODE_NATIVE);
+    return HWC2::Error::None;
+  }
+
+  for (auto &c : temp_modes)
+    out_modes.emplace_back(static_cast<int32_t>(c));
 
   return HWC2::Error::None;
 }
@@ -569,12 +745,35 @@ HWC2::Error HwcDisplay::GetDozeSupport(int32_t *support) {
   return HWC2::Error::None;
 }
 
-HWC2::Error HwcDisplay::GetHdrCapabilities(uint32_t *num_types,
-                                           int32_t * /*types*/,
-                                           float * /*max_luminance*/,
-                                           float * /*max_average_luminance*/,
-                                           float * /*min_luminance*/) {
-  *num_types = 0;
+HWC2::Error HwcDisplay::GetHdrCapabilities(uint32_t *num_types, int32_t *types,
+                                           float *max_luminance,
+                                           float *max_average_luminance,
+                                           float *min_luminance) {
+  if (!types) {
+    std::vector<ui::Hdr> temp_types;
+    float lums[3] = {0.F};
+    GetEdid()->GetHdrCapabilities(temp_types, &lums[0], &lums[1], &lums[2]);
+    *num_types = temp_types.size();
+    return HWC2::Error::None;
+  }
+
+  std::vector<ui::Hdr> temp_types;
+  std::vector<int32_t> out_types(types, types + *num_types);
+  GetEdid()->GetHdrCapabilities(temp_types, max_luminance,
+                                max_average_luminance, min_luminance);
+  for (auto &t : temp_types) {
+    switch (t) {
+      case ui::Hdr::HDR10:
+        out_types.emplace_back(HAL_HDR_HDR10);
+        break;
+      case ui::Hdr::HLG:
+        out_types.emplace_back(HAL_HDR_HLG);
+        break;
+      default:
+        // Ignore any other HDR types
+        break;
+    }
+  }
   return HWC2::Error::None;
 }
 
@@ -625,6 +824,7 @@ AtomicCommitArgs HwcDisplay::CreateModesetCommit(
   args.color_matrix = color_matrix_;
   args.content_type = content_type_;
   args.colorspace = colorspace_;
+  args.hdr_metadata = hdr_metadata_;
 
   std::vector<LayerData> composition_layers;
   if (modeset_layer) {
@@ -654,6 +854,7 @@ HWC2::Error HwcDisplay::CreateComposition(AtomicCommitArgs &a_args) {
   a_args.color_matrix = color_matrix_;
   a_args.content_type = content_type_;
   a_args.colorspace = colorspace_;
+  a_args.hdr_metadata = hdr_metadata_;
 
   uint32_t prev_vperiod_ns = 0;
   GetDisplayVsyncPeriod(&prev_vperiod_ns);
@@ -666,11 +867,14 @@ HWC2::Error HwcDisplay::CreateComposition(AtomicCommitArgs &a_args) {
     if (staged_config == nullptr) {
       return HWC2::Error::BadConfig;
     }
-    client_layer_.SetLayerDisplayFrame(
-        (hwc_rect_t){.left = 0,
-                     .top = 0,
-                     .right = int(staged_config->mode.GetRawMode().hdisplay),
-                     .bottom = int(staged_config->mode.GetRawMode().vdisplay)});
+    HwcLayer::LayerProperties lp;
+    lp.display_frame = {
+        .left = 0,
+        .top = 0,
+        .right = int(staged_config->mode.GetRawMode().hdisplay),
+        .bottom = int(staged_config->mode.GetRawMode().vdisplay),
+    };
+    client_layer_.SetLayerProperties(lp);
 
     configs_.active_config_id = staged_mode_config_id_.value();
     a_args.display_mode = staged_config->mode;
@@ -828,8 +1032,12 @@ HWC2::Error HwcDisplay::SetClientTarget(buffer_handle_t target,
                                         int32_t acquire_fence,
                                         int32_t dataspace,
                                         hwc_region_t /*damage*/) {
-  client_layer_.SetLayerBuffer(target, acquire_fence);
-  client_layer_.SetLayerDataspace(dataspace);
+  HwcLayer::LayerProperties lp;
+  lp.buffer = {.buffer_handle = target,
+               .acquire_fence = MakeSharedFd(acquire_fence)};
+  lp.color_space = Hwc2ToColorSpace(dataspace);
+  lp.sample_range = Hwc2ToSampleRange(dataspace);
+  client_layer_.SetLayerProperties(lp);
 
   /*
    * target can be nullptr, this does mean the Composer Service is calling
@@ -857,11 +1065,12 @@ HWC2::Error HwcDisplay::SetClientTarget(buffer_handle_t target,
     return HWC2::Error::BadLayer;
   }
 
-  auto source_crop = (hwc_frect_t){.left = 0.0F,
-                                   .top = 0.0F,
-                                   .right = static_cast<float>(bi->width),
-                                   .bottom = static_cast<float>(bi->height)};
-  client_layer_.SetLayerSourceCrop(source_crop);
+  lp = {};
+  lp.source_crop = {.left = 0.0F,
+                    .top = 0.0F,
+                    .right = float(bi->width),
+                    .bottom = float(bi->height)};
+  client_layer_.SetLayerProperties(lp);
 
   return HWC2::Error::None;
 }
@@ -870,46 +1079,53 @@ HWC2::Error HwcDisplay::SetColorMode(int32_t mode) {
   /* Maps to the Colorspace DRM connector property:
    * https://elixir.bootlin.com/linux/v6.11/source/include/drm/drm_connector.h#L538
    */
-  if (mode < HAL_COLOR_MODE_NATIVE || mode > HAL_COLOR_MODE_DISPLAY_P3)
+  if (mode < HAL_COLOR_MODE_NATIVE || mode > HAL_COLOR_MODE_DISPLAY_BT2020)
     return HWC2::Error::BadParameter;
 
   switch (mode) {
     case HAL_COLOR_MODE_NATIVE:
+      hdr_metadata_.reset();
       colorspace_ = Colorspace::kDefault;
       break;
     case HAL_COLOR_MODE_STANDARD_BT601_625:
     case HAL_COLOR_MODE_STANDARD_BT601_625_UNADJUSTED:
     case HAL_COLOR_MODE_STANDARD_BT601_525:
     case HAL_COLOR_MODE_STANDARD_BT601_525_UNADJUSTED:
+      hdr_metadata_.reset();
       // The DP spec does not say whether this is the 525 or the 625 line version.
       colorspace_ = Colorspace::kBt601Ycc;
       break;
     case HAL_COLOR_MODE_STANDARD_BT709:
     case HAL_COLOR_MODE_SRGB:
+      hdr_metadata_.reset();
       colorspace_ = Colorspace::kBt709Ycc;
       break;
     case HAL_COLOR_MODE_DCI_P3:
     case HAL_COLOR_MODE_DISPLAY_P3:
+      hdr_metadata_.reset();
       colorspace_ = Colorspace::kDciP3RgbD65;
       break;
+    case HAL_COLOR_MODE_DISPLAY_BT2020: {
+      std::vector<ui::Hdr> hdr_types;
+      GetEdid()->GetSupportedHdrTypes(hdr_types);
+      if (!hdr_types.empty()) {
+        auto ret = SetHdrOutputMetadata(hdr_types.front());
+        if (ret != HWC2::Error::None)
+          return ret;
+      }
+      colorspace_ = Colorspace::kBt2020Rgb;
+      break;
+    }
     case HAL_COLOR_MODE_ADOBE_RGB:
+    case HAL_COLOR_MODE_BT2020:
+    case HAL_COLOR_MODE_BT2100_PQ:
+    case HAL_COLOR_MODE_BT2100_HLG:
     default:
       return HWC2::Error::Unsupported;
   }
 
   color_mode_ = mode;
   return HWC2::Error::None;
-}
-
-#include <xf86drmMode.h>
-
-static uint64_t To3132FixPt(float in) {
-  constexpr uint64_t kSignMask = (1ULL << 63);
-  constexpr uint64_t kValueMask = ~(1ULL << 63);
-  constexpr auto kValueScale = static_cast<float>(1ULL << 32);
-  if (in < 0)
-    return (static_cast<uint64_t>(-in * kValueScale) & kValueMask) | kSignMask;
-  return static_cast<uint64_t>(in * kValueScale) & kValueMask;
 }
 
 HWC2::Error HwcDisplay::SetColorTransform(const float *matrix, int32_t hint) {
@@ -934,37 +1150,14 @@ HWC2::Error HwcDisplay::SetColorTransform(const float *matrix, int32_t hint) {
       break;
     case HAL_COLOR_TRANSFORM_ARBITRARY_MATRIX:
       // Without HW support, we cannot correctly process matrices with an offset.
-      for (int i = 12; i < 14; i++) {
-        if (matrix[i] != 0.F)
-          return HWC2::Error::Unsupported;
-      }
-
-      /* HAL provides a 4x4 float type matrix:
-       * | 0  1  2  3|
-       * | 4  5  6  7|
-       * | 8  9 10 11|
-       * |12 13 14 15|
-       *
-       * R_out = R*0 + G*4 + B*8 + 12
-       * G_out = R*1 + G*5 + B*9 + 13
-       * B_out = R*2 + G*6 + B*10 + 14
-       *
-       * DRM expects a 3x3 s31.32 fixed point matrix:
-       * out   matrix    in
-       * |R|   |0 1 2|   |R|
-       * |G| = |3 4 5| x |G|
-       * |B|   |6 7 8|   |B|
-       *
-       * R_out = R*0 + G*1 + B*2
-       * G_out = R*3 + G*4 + B*5
-       * B_out = R*6 + G*7 + B*8
-       */
-      color_matrix_ = std::make_shared<drm_color_ctm>();
-      for (int i = 0; i < kCtmCols; i++) {
-        for (int j = 0; j < kCtmRows; j++) {
-          constexpr int kInCtmRows = 4;
-          color_matrix_->matrix[i * kCtmRows + j] = To3132FixPt(matrix[j * kInCtmRows + i]);
+      {
+        for (int i = 12; i < 14; i++) {
+          if (matrix[i] != 0.F)
+            return HWC2::Error::Unsupported;
         }
+        std::array<float, 16> aidl_matrix = kIdentityMatrix;
+        memcpy(aidl_matrix.data(), matrix, aidl_matrix.size() * sizeof(float));
+        color_matrix_ = ToColorTransform(aidl_matrix);
       }
       break;
     default:
@@ -989,7 +1182,10 @@ bool HwcDisplay::CtmByGpu() {
 
 HWC2::Error HwcDisplay::SetOutputBuffer(buffer_handle_t buffer,
                                         int32_t release_fence) {
-  writeback_layer_->SetLayerBuffer(buffer, release_fence);
+  HwcLayer::LayerProperties lp;
+  lp.buffer = {.buffer_handle = buffer,
+               .acquire_fence = MakeSharedFd(release_fence)};
+  writeback_layer_->SetLayerProperties(lp);
   writeback_layer_->PopulateLayerData();
   if (!writeback_layer_->IsLayerUsableAsDevice()) {
     ALOGE("Output layer must be always usable by DRM/KMS");
@@ -1105,6 +1301,61 @@ HWC2::Error HwcDisplay::GetDisplayVsyncPeriod(
   return GetDisplayAttribute(configs_.active_config_id,
                              HWC2_ATTRIBUTE_VSYNC_PERIOD,
                              (int32_t *)(outVsyncPeriod));
+}
+
+// Display primary values are coded as unsigned 16-bit values in units of
+// 0.00002, where 0x0000 represents zero and 0xC350 represents 1.0000.
+static uint64_t ToU16ColorValue(float in) {
+  constexpr float kPrimariesFixedPoint = 50000.F;
+  return static_cast<uint64_t>(kPrimariesFixedPoint * in);
+}
+
+HWC2::Error HwcDisplay::SetHdrOutputMetadata(ui::Hdr type) {
+  hdr_metadata_ = std::make_shared<hdr_output_metadata>();
+  hdr_metadata_->metadata_type = 0;
+  auto *m = &hdr_metadata_->hdmi_metadata_type1;
+  m->metadata_type = 0;
+
+  switch (type) {
+    case ui::Hdr::HDR10:
+      m->eotf = 2;  // PQ
+      break;
+    case ui::Hdr::HLG:
+      m->eotf = 3;  // HLG
+      break;
+    default:
+      return HWC2::Error::Unsupported;
+  }
+
+  // Most luminance values are coded as an unsigned 16-bit value in units of 1
+  // cd/m2, where 0x0001 represents 1 cd/m2 and 0xFFFF represents 65535 cd/m2.
+  std::vector<ui::Hdr> types;
+  float hdr_luminance[3]{0.F, 0.F, 0.F};
+  GetEdid()->GetHdrCapabilities(types, &hdr_luminance[0], &hdr_luminance[1],
+                                &hdr_luminance[2]);
+  m->max_display_mastering_luminance = m->max_cll = static_cast<uint64_t>(
+      hdr_luminance[0]);
+  m->max_fall = static_cast<uint64_t>(hdr_luminance[1]);
+  // The min luminance value is coded as an unsigned 16-bit value in units of
+  // 0.0001 cd/m2, where 0x0001 represents 0.0001 cd/m2 and 0xFFFF
+  // represents 6.5535 cd/m2.
+  m->min_display_mastering_luminance = static_cast<uint64_t>(hdr_luminance[2] *
+                                                             10000.F);
+
+  auto gamut = ColorGamut::BT2020();
+  auto primaries = gamut.getPrimaries();
+  m->display_primaries[0].x = ToU16ColorValue(primaries[0].x);
+  m->display_primaries[0].y = ToU16ColorValue(primaries[0].y);
+  m->display_primaries[1].x = ToU16ColorValue(primaries[1].x);
+  m->display_primaries[1].y = ToU16ColorValue(primaries[1].y);
+  m->display_primaries[2].x = ToU16ColorValue(primaries[2].x);
+  m->display_primaries[2].y = ToU16ColorValue(primaries[2].y);
+
+  auto whitePoint = gamut.getWhitePoint();
+  m->white_point.x = ToU16ColorValue(whitePoint.x);
+  m->white_point.y = ToU16ColorValue(whitePoint.y);
+
+  return HWC2::Error::None;
 }
 
 #if __ANDROID_API__ > 29

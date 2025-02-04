@@ -16,8 +16,6 @@ CXXARGS := $(shell cat $(BASE_DIR)/toolchain_wrapper/sharedlib.cppflags)
 CXXARGS := $(subst [BASE_DIR],$(BASE_DIR),$(CXXARGS))
 # clang-tidy doesn't like -mcpu=xxx flag
 CXXARGS := $(patsubst -mcpu=%,,$(CXXARGS))
-# TODO: build aospless with gtest enabled and remove line below
-CXXARGS := $(subst -nostdlibinc,,$(CXXARGS))
 CXXARGS += -I. -I./tests/test_include $(CXXFLAGS)
 
 TIDY_FILES_OVERRIDE := \
@@ -55,14 +53,6 @@ TIDY_CHECKS_FINE := *                                   \
     -readability-redundant-member-init                  \
     -cppcoreguidelines-avoid-const-or-ref-data-members  \
     -cert-err33-c                                       \
-    -readability-math-missing-parentheses               \
-    -readability-avoid-unconditional-preprocessor-if    \
-    -modernize-type-traits                              \
-    -clang-analyzer-optin.core.EnumCastOutOfRange       \
-    -performance-inefficient-vector-operation           \
-    -readability-static-accessed-through-instance       \
-    -misc-use-internal-linkage                          \
-    -performance-avoid-endl                             \
 
 TIDY_CHECKS_NORMAL :=                                   \
     $(TIDY_CHECKS_FINE)                                 \
