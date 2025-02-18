@@ -25,6 +25,7 @@
 
 #include "DrmDevice.h"
 #include "bufferinfo/BufferInfoGetter.h"
+#include "compositor/LayerData.h"
 #include "utils/log.h"
 
 namespace android {
@@ -107,17 +108,17 @@ int DrmPlane::Init() {
   GetPlaneProperty("IN_FENCE_FD", in_fence_fd_property_, Presence::kOptional);
 
   if (HasNonRgbFormat()) {
-    if (GetPlaneProperty("COLOR_ENCODING", color_encoding_propery_,
+    if (GetPlaneProperty("COLOR_ENCODING", color_encoding_property_,
                          Presence::kOptional)) {
-      color_encoding_propery_.AddEnumToMap("ITU-R BT.709 YCbCr",
-                                           BufferColorSpace::kItuRec709,
-                                           color_encoding_enum_map_);
-      color_encoding_propery_.AddEnumToMap("ITU-R BT.601 YCbCr",
-                                           BufferColorSpace::kItuRec601,
-                                           color_encoding_enum_map_);
-      color_encoding_propery_.AddEnumToMap("ITU-R BT.2020 YCbCr",
-                                           BufferColorSpace::kItuRec2020,
-                                           color_encoding_enum_map_);
+      color_encoding_property_.AddEnumToMap("ITU-R BT.709 YCbCr",
+                                            BufferColorSpace::kItuRec709,
+                                            color_encoding_enum_map_);
+      color_encoding_property_.AddEnumToMap("ITU-R BT.601 YCbCr",
+                                            BufferColorSpace::kItuRec601,
+                                            color_encoding_enum_map_);
+      color_encoding_property_.AddEnumToMap("ITU-R BT.2020 YCbCr",
+                                            BufferColorSpace::kItuRec2020,
+                                            color_encoding_enum_map_);
     }
 
     if (GetPlaneProperty("COLOR_RANGE", color_range_property_,
@@ -145,7 +146,7 @@ bool DrmPlane::IsCrtcSupported(const DrmCrtc &crtc) const {
     // any CRTC already, which is protected by the plane_switching_crtc function
     // in the kernel drivers/gpu/drm/drm_atomic.c file.
     // The current drm_hwc design is not ready to support such scenario yet,
-    // so adding the CRTC status check here to workaorund for now.
+    // so adding the CRTC status check here to workaround for now.
     return false;
   }
 
@@ -188,7 +189,7 @@ bool DrmPlane::IsValidForLayer(LayerData *layer) {
     return false;
   }
 
-  if (!alpha_property_ && layer->pi.alpha != UINT16_MAX) {
+  if (!alpha_property_ && layer->pi.alpha != kAlphaOpaque) {
     ALOGV("Alpha is not supported on plane %d", GetId());
     return false;
   }
@@ -229,7 +230,8 @@ static int To1616FixPt(float in) {
 }
 
 auto DrmPlane::AtomicSetState(drmModeAtomicReq &pset, LayerData &layer,
-                              uint32_t zpos, uint32_t crtc_id) -> int {
+                              uint32_t zpos, uint32_t crtc_id,
+                              DstRectInfo &whole_display_rect) -> int {
   if (!layer.fb || !layer.bi) {
     ALOGE("%s: Invalid arguments", __func__);
     return -EINVAL;
@@ -251,8 +253,24 @@ auto DrmPlane::AtomicSetState(drmModeAtomicReq &pset, LayerData &layer,
     return -EINVAL;
   }
 
-  auto &disp = layer.pi.display_frame;
-  auto &src = layer.pi.source_crop;
+  auto opt_disp = layer.pi.display_frame.i_rect;
+  if (!layer.pi.display_frame.i_rect) {
+    opt_disp = whole_display_rect.i_rect;
+  }
+
+  auto opt_src = layer.pi.source_crop.f_rect;
+  if (!layer.pi.source_crop.f_rect) {
+    opt_src = {0.0F, 0.0F, float(layer.bi->width), float(layer.bi->height)};
+  }
+
+  if (!opt_disp || !opt_src) {
+    ALOGE("%s: Invalid display frame or source crop", __func__);
+    return -EINVAL;
+  }
+
+  auto disp = opt_disp.value();
+  auto src = opt_src.value();
+
   if (!crtc_property_.AtomicSet(pset, crtc_id) ||
       !fb_property_.AtomicSet(pset, layer.fb->GetFbId()) ||
       !crtc_x_property_.AtomicSet(pset, disp.left) ||
@@ -271,7 +289,9 @@ auto DrmPlane::AtomicSetState(drmModeAtomicReq &pset, LayerData &layer,
     return -EINVAL;
   }
 
-  if (alpha_property_ && !alpha_property_.AtomicSet(pset, layer.pi.alpha)) {
+  if (alpha_property_ &&
+      !alpha_property_.AtomicSet(pset,
+                                 std::lround(layer.pi.alpha * UINT16_MAX))) {
     return -EINVAL;
   }
 
@@ -282,7 +302,7 @@ auto DrmPlane::AtomicSetState(drmModeAtomicReq &pset, LayerData &layer,
   }
 
   if (color_encoding_enum_map_.count(layer.bi->color_space) != 0 &&
-      !color_encoding_propery_
+      !color_encoding_property_
            .AtomicSet(pset, color_encoding_enum_map_[layer.bi->color_space])) {
     return -EINVAL;
   }

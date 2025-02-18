@@ -9,11 +9,11 @@ third_party {
   last_upgrade_date {
     year: 2025
     month: 2
-    day: 4
+    day: 18
   }
   identifier {
     type: "Git"
     value: "https://gitlab.freedesktop.org/drm-hwcomposer/drm-hwcomposer"
-    version: "851ea4dc268c4da612c65a5dfedbd3ed85960405"
+    version: "75855a6ab877011a2e26ae95da7ddf06dd3a04b2"
   }
 }
