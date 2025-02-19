@@ -18,6 +18,7 @@
 
 #include "DrmDevice.h"
 
+#include <sys/mman.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -34,13 +35,13 @@
 namespace android {
 
 auto DrmDevice::CreateInstance(std::string const &path,
-                               ResourceManager *res_man)
+                               ResourceManager *res_man, uint32_t index)
     -> std::unique_ptr<DrmDevice> {
   if (!IsKMSDev(path.c_str())) {
     return {};
   }
 
-  auto device = std::unique_ptr<DrmDevice>(new DrmDevice(res_man));
+  auto device = std::unique_ptr<DrmDevice>(new DrmDevice(res_man, index));
 
   if (device->Init(path.c_str()) != 0) {
     return {};
@@ -49,7 +50,8 @@ auto DrmDevice::CreateInstance(std::string const &path,
   return device;
 }
 
-DrmDevice::DrmDevice(ResourceManager *res_man) : res_man_(res_man) {
+DrmDevice::DrmDevice(ResourceManager *res_man, uint32_t index)
+    : index_in_dev_array_(index), res_man_(res_man) {
   drm_fb_importer_ = std::make_unique<DrmFbImporter>(*this);
 }
 
@@ -259,5 +261,94 @@ auto DrmDevice::GetEncoders()
     -> const std::vector<std::unique_ptr<DrmEncoder>> & {
   return encoders_;
 }
+
+class DumbBufferFd : public PrimeFdsSharedBase {
+ public:
+  SharedFd fd;
+};
+
+// NOLINTBEGIN(cppcoreguidelines-avoid-goto)
+auto DrmDevice::CreateBufferForModeset(uint32_t width, uint32_t height)
+    -> std::optional<BufferInfo> {
+  constexpr uint32_t kDumbBufferFormat = DRM_FORMAT_XRGB8888;
+  constexpr uint32_t kDumbBufferBpp = 32;
+
+  std::optional<BufferInfo> result;
+  void *ptr = MAP_FAILED;
+  struct drm_mode_create_dumb create = {
+      .height = height,
+      .width = width,
+      .bpp = kDumbBufferBpp,
+      .flags = 0,
+  };
+
+  int ret = drmIoctl(*fd_, DRM_IOCTL_MODE_CREATE_DUMB, &create);
+  if (ret != 0) {
+    ALOGE("Failed to DRM_IOCTL_MODE_CREATE_DUMB %d", errno);
+    return {};
+  }
+
+  struct drm_mode_map_dumb map = {
+      .handle = create.handle,
+  };
+
+  auto dumb_buffer_fd = std::make_shared<DumbBufferFd>();
+
+  BufferInfo buffer_info = {
+      .width = width,
+      .height = height,
+
+      .format = kDumbBufferFormat,
+      .pitches = {create.pitch},
+      .prime_fds = {-1, -1, -1, -1},
+      .modifiers = {DRM_FORMAT_MOD_NONE},
+
+      .color_space = BufferColorSpace::kUndefined,
+      .sample_range = BufferSampleRange::kUndefined,
+      .blend_mode = BufferBlendMode::kNone,
+
+      .fds_shared = dumb_buffer_fd,
+  };
+
+  ret = drmIoctl(*fd_, DRM_IOCTL_MODE_MAP_DUMB, &map);
+  if (ret != 0) {
+    ALOGE("Failed to DRM_IOCTL_MODE_MAP_DUMB %d", errno);
+    goto done;
+  }
+
+  ptr = mmap(nullptr, create.size, PROT_READ | PROT_WRITE, MAP_SHARED, *fd_,
+             (off_t)map.offset);
+  if (ptr == MAP_FAILED) {
+    ALOGE("Failed to mmap dumb buffer %d", errno);
+    goto done;
+  }
+
+  memset(ptr, 0, create.size);
+
+  if (munmap(ptr, create.size) != 0) {
+    ALOGE("Failed to unmap dumb buffer: %d", errno);
+  }
+
+  ret = drmPrimeHandleToFD(*fd_, create.handle, 0, &buffer_info.prime_fds[0]);
+  if (ret != 0) {
+    ALOGE("Failed to export dumb buffer as FD: %d", errno);
+    goto done;
+  }
+
+  dumb_buffer_fd->fd = MakeSharedFd(buffer_info.prime_fds[0]);
+
+  result = buffer_info;
+
+done:
+  if (create.handle > 0) {
+    struct drm_mode_destroy_dumb destroy = {
+        .handle = create.handle,
+    };
+    drmIoctl(*fd_, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+  }
+
+  return result;
+}
+// NOLINTEND(cppcoreguidelines-avoid-goto)
 
 }  // namespace android

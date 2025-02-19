@@ -49,7 +49,7 @@ class DrmPlane : public PipelineBindable<DrmPlane> {
   bool HasNonRgbFormat() const;
 
   auto AtomicSetState(drmModeAtomicReq &pset, LayerData &layer, uint32_t zpos,
-                      uint32_t crtc_id) -> int;
+                      uint32_t crtc_id, DstRectInfo &whole_display_rect) -> int;
   auto AtomicDisablePlane(drmModeAtomicReq &pset) -> int;
   auto &GetZPosProperty() const {
     return zpos_property_;
@@ -90,7 +90,7 @@ class DrmPlane : public PipelineBindable<DrmPlane> {
   DrmProperty alpha_property_;
   DrmProperty blend_property_;
   DrmProperty in_fence_fd_property_;
-  DrmProperty color_encoding_propery_;
+  DrmProperty color_encoding_property_;
   DrmProperty color_range_property_;
 
   std::map<BufferBlendMode, uint64_t> blending_enum_map_;

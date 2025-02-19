@@ -18,11 +18,13 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <tuple>
 
 #include "DrmConnector.h"
 #include "DrmCrtc.h"
 #include "DrmEncoder.h"
+#include "bufferinfo/BufferInfo.h"
 #include "utils/fd.h"
 
 namespace android {
@@ -35,11 +37,15 @@ class DrmDevice {
  public:
   ~DrmDevice() = default;
 
-  static auto CreateInstance(std::string const &path, ResourceManager *res_man)
-      -> std::unique_ptr<DrmDevice>;
+  static auto CreateInstance(std::string const &path, ResourceManager *res_man,
+                             uint32_t index) -> std::unique_ptr<DrmDevice>;
 
   auto &GetFd() const {
     return fd_;
+  }
+
+  auto GetIndexInDevArray() const {
+    return index_in_dev_array_;
   }
 
   auto &GetResMan() {
@@ -70,6 +76,9 @@ class DrmDevice {
     return HasAddFb2ModifiersSupport_;
   }
 
+  auto CreateBufferForModeset(uint32_t width, uint32_t height)
+      -> std::optional<BufferInfo>;
+
   auto &GetDrmFbImporter() {
     return *drm_fb_importer_;
   }
@@ -98,12 +107,13 @@ class DrmDevice {
                   DrmProperty *property) const;
 
  private:
-  explicit DrmDevice(ResourceManager *res_man);
+  explicit DrmDevice(ResourceManager *res_man, uint32_t index);
   auto Init(const char *path) -> int;
 
   static auto IsKMSDev(const char *path) -> bool;
 
   SharedFd fd_;
+  const uint32_t index_in_dev_array_;
 
   std::vector<std::unique_ptr<DrmConnector>> connectors_;
   std::vector<std::unique_ptr<DrmConnector>> writeback_connectors_;
