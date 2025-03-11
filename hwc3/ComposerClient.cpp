@@ -30,6 +30,7 @@
 #include <aidl/android/hardware/graphics/composer3/Composition.h>
 #include <aidl/android/hardware/graphics/composer3/DisplayRequest.h>
 #include <aidl/android/hardware/graphics/composer3/IComposerClient.h>
+#include <aidl/android/hardware/graphics/composer3/Luts.h>
 #include <aidl/android/hardware/graphics/composer3/PowerMode.h>
 #include <aidl/android/hardware/graphics/composer3/PresentOrValidate.h>
 #include <aidl/android/hardware/graphics/composer3/RenderIntent.h>
@@ -634,6 +635,9 @@ void ComposerClient::DispatchLayerCommand(int64_t display_id,
   // TODO: Audit whether some of these should actually return kUnsupported
   // instead.
   if (command.sidebandStream) {
+    cmd_result_writer_->AddError(hwc3::Error::kUnsupported);
+  }
+  if (command.luts) {
     cmd_result_writer_->AddError(hwc3::Error::kUnsupported);
   }
   // TODO: Blocking region handling missing.
@@ -1433,7 +1437,21 @@ ndk::ScopedAStatus ComposerClient::notifyExpectedPresent(
   return ToBinderStatus(hwc3::Error::kUnsupported);
 }
 
+ndk::ScopedAStatus ComposerClient::startHdcpNegotiation(
+    int64_t /*display*/, const AidlHdcpLevels& /*levels*/) {
+  return ToBinderStatus(hwc3::Error::kUnsupported);
+}
+
 #endif
+
+ndk::ScopedAStatus ComposerClient::getMaxLayerPictureProfiles(int64_t, int32_t*) {
+  return ToBinderStatus(hwc3::Error::kUnsupported);
+}
+
+ndk::ScopedAStatus ComposerClient::getLuts(int64_t, const std::vector<Buffer>&,
+    std::vector<Luts>*) {
+  return ToBinderStatus(hwc3::Error::kUnsupported);
+}
 
 std::string ComposerClient::Dump() {
   uint32_t size = 0;
