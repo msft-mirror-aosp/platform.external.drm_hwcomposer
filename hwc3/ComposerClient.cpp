@@ -45,6 +45,7 @@
 #if __ANDROID_API__ >= 36
 #include <aidl/android/hardware/drm/HdcpLevel.h>
 #include <aidl/android/hardware/graphics/composer3/OutputType.h>
+#include <aidl/android/hardware/graphics/composer3/VsyncSample.h>
 #endif
 
 #include <cinttypes>
@@ -1133,6 +1134,11 @@ ndk::ScopedAStatus ComposerClient::getMaxLayerPictureProfiles(int64_t /* display
 ndk::ScopedAStatus ComposerClient::getLuts(int64_t /* display */,
                                            const std::vector<Buffer>& /* buffers */,
                                            std::vector<Luts>* /* out_luts */) {
+  return ToBinderStatus(hwc3::Error::kUnsupported);
+}
+
+ndk::ScopedAStatus ComposerClient::getDisplayKnownVsyncSample(
+    int64_t /* display */, VsyncSample* /* sample */) {
   return ToBinderStatus(hwc3::Error::kUnsupported);
 }
 

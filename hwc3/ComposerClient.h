@@ -72,6 +72,9 @@ class HwcDisplay;
 
 namespace aidl::android::hardware::graphics::composer3 {
 class CommandResultWriter;
+#if __ANDROID_API__ >= 36
+class VsyncSample;
+#endif
 
 namespace hwc3 {
 enum class Error;
@@ -199,6 +202,8 @@ class ComposerClient : public BnComposerClient {
   ndk::ScopedAStatus getLuts(int64_t display,
                              const std::vector<Buffer>& buffers,
                              std::vector<Luts>* out_luts) override;
+  ndk::ScopedAStatus getDisplayKnownVsyncSample(int64_t display,
+                                                VsyncSample* sample) override;
 #endif
 
  protected:
