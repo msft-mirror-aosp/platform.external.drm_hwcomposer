@@ -1109,21 +1109,32 @@ ndk::ScopedAStatus ComposerClient::notifyExpectedPresent(
 
 ndk::ScopedAStatus ComposerClient::startHdcpNegotiation(
     int64_t display_handle, const drm::HdcpLevels& levels) {
+  ndk::ScopedAStatus status;
   HwcDisplay* display = GetDisplay(display_handle);
   if (display == nullptr) {
-    return ToBinderStatus(hwc3::Error::kBadDisplay);
-  }
-  // Client can only request lazy HDCP activation/start
-  // TODO: Add HDCP terminate/stop request once client handles it
-  if (levels.connectedLevel != drm::HdcpLevel::HDCP_NONE &&
-      levels.connectedLevel != drm::HdcpLevel::HDCP_UNKNOWN) {
-    ALOGI("Requested to start HDCP for connected level : %d",
-          static_cast<int>(levels.connectedLevel));
-    if (!display->StartHdcp()) {
-      return ToBinderStatus(hwc3::Error::kUnsupported);
+    status = ToBinderStatus(hwc3::Error::kBadDisplay);
+  } else {
+    status = ToBinderStatus(hwc3::Error::kBadParameter);
+    // Client can only request lazy HDCP activation/start
+    // TODO: Add HDCP terminate/stop request once client handles it
+    if (levels.connectedLevel != drm::HdcpLevel::HDCP_NONE &&
+        levels.connectedLevel != drm::HdcpLevel::HDCP_UNKNOWN) {
+      ALOGI("Requested to start HDCP for connected level : %d",
+            static_cast<int>(levels.connectedLevel));
+      if (display->StartHdcp()) {
+        status = ndk::ScopedAStatus::ok();
+      } else {
+        status = ToBinderStatus(hwc3::Error::kUnsupported);
+      }
     }
   }
-  return ndk::ScopedAStatus::ok();
+
+  if (!status.isOk()) {
+    // async call must report error via callback
+    hwc_->NotifyHdcpErrorToClient(display_handle);
+  }
+
+  return status;
 }
 
 ndk::ScopedAStatus ComposerClient::getMaxLayerPictureProfiles(int64_t /* display */,
