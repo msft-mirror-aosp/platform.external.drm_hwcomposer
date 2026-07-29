@@ -18,6 +18,7 @@
 
 #include "ComposerClient.h"
 
+#include <aidl/android/hardware/drm/HdcpLevel.h>
 #include <aidl/android/hardware/graphics/common/Dataspace.h>
 #include <aidl/android/hardware/graphics/common/HdrConversionStrategy.h>
 #include <aidl/android/hardware/graphics/common/Transform.h>
@@ -31,9 +32,11 @@
 #include <aidl/android/hardware/graphics/composer3/FormatColorComponent.h>
 #include <aidl/android/hardware/graphics/composer3/IComposerClient.h>
 #include <aidl/android/hardware/graphics/composer3/LayerCommand.h>
+#include <aidl/android/hardware/graphics/composer3/OutputType.h>
 #include <aidl/android/hardware/graphics/composer3/PerFrameMetadataKey.h>
 #include <aidl/android/hardware/graphics/composer3/PowerMode.h>
 #include <aidl/android/hardware/graphics/composer3/RenderIntent.h>
+#include <aidl/android/hardware/graphics/composer3/VsyncSample.h>
 #include <aidlcommonsupport/NativeHandle.h>
 #include <android/binder_auto_utils.h>
 #include <android/binder_ibinder_platform.h>
@@ -41,12 +44,6 @@
 #include <ui/GraphicBufferMapper.h>
 #include <ui/GraphicTypes.h>
 #include <utils/Errors.h>
-
-#if __ANDROID_API__ >= 36
-#include <aidl/android/hardware/drm/HdcpLevel.h>
-#include <aidl/android/hardware/graphics/composer3/OutputType.h>
-#include <aidl/android/hardware/graphics/composer3/VsyncSample.h>
-#endif
 
 #include <cinttypes>
 #include <cstdint>
@@ -92,17 +89,14 @@ using ::android::drm_hwcomposer::IRect;
 using ::android::drm_hwcomposer::PanelOrientation;
 using ::android::drm_hwcomposer::StatsPoller;
 
-#if __ANDROID_API__ >= 36
 using HwcOutputType = ::android::drm_hwcomposer::OutputType;
 using AidlOutputType = aidl::android::hardware::graphics::composer3::OutputType;
-#endif
 using AidlRenderIntent = aidl::android::hardware::graphics::composer3::
     RenderIntent;
 
 namespace aidl::android::hardware::graphics::composer3::impl {
 namespace {
 
-#if __ANDROID_API__ >= 36
 AidlOutputType OutputTypeToAidl(const HwcOutputType output_type) {
   switch (output_type) {
     case HwcOutputType::kSystem:
@@ -117,7 +111,6 @@ AidlOutputType OutputTypeToAidl(const HwcOutputType output_type) {
       return AidlOutputType::INVALID;
   }
 }
-#endif
 
 DisplayConfiguration HwcDisplayConfigToAidlConfiguration(
     int32_t width, int32_t height, const HwcDisplayConfig& config) {
@@ -128,9 +121,7 @@ DisplayConfiguration HwcDisplayConfigToAidlConfiguration(
        .configGroup = static_cast<int32_t>(config.group_id),
        .vsyncPeriod = config.mode.GetVSyncPeriodNs()};
 
-#if __ANDROID_API__ >= 36
   aidl_configuration.hdrOutputType = OutputTypeToAidl(config.output_type);
-#endif
 
   if (width > 0) {
     static const float kMmPerInch = 25.4;
@@ -798,13 +789,8 @@ ndk::ScopedAStatus ComposerClient::setActiveConfigWithConstraints(
       return ToBinderStatus(hwc3::Error::kSeamlessNotAllowed);
     case HwcDisplay::ConfigError::kSeamlessNotPossible:
       return ToBinderStatus(hwc3::Error::kSeamlessNotPossible);
-#if __ANDROID_API__ >= 36
     case HwcDisplay::ConfigError::kConfigFailed:
       return ToBinderStatus(hwc3::Error::kConfigFailed);
-#else
-    case HwcDisplay::ConfigError::kConfigFailed:
-      return ToBinderStatus(hwc3::Error::kBadConfig);
-#endif
     case HwcDisplay::ConfigError::kNone:
       return ndk::ScopedAStatus::ok();
   }
@@ -1105,8 +1091,6 @@ ndk::ScopedAStatus ComposerClient::notifyExpectedPresent(
   return ToBinderStatus(hwc3::Error::kUnsupported);
 }
 
-#if __ANDROID_API__ >= 36
-
 ndk::ScopedAStatus ComposerClient::startHdcpNegotiation(
     int64_t display_handle, const drm::HdcpLevels& levels) {
   ndk::ScopedAStatus status;
@@ -1152,8 +1136,6 @@ ndk::ScopedAStatus ComposerClient::getDisplayKnownVsyncSample(
     int64_t /* display */, VsyncSample* /* sample */) {
   return ToBinderStatus(hwc3::Error::kUnsupported);
 }
-
-#endif
 
 std::string ComposerClient::Dump() {
   std::stringstream output;

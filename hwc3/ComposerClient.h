@@ -16,9 +16,7 @@
 
 #pragma once
 
-#if __ANDROID_API__ >= 36
 #include <aidl/android/hardware/drm/HdcpLevels.h>
-#endif
 #include <aidl/android/hardware/graphics/common/Dataspace.h>
 #include <aidl/android/hardware/graphics/common/DisplayDecorationSupport.h>
 #include <aidl/android/hardware/graphics/common/Hdr.h>
@@ -72,9 +70,7 @@ class HwcDisplay;
 
 namespace aidl::android::hardware::graphics::composer3 {
 class CommandResultWriter;
-#if __ANDROID_API__ >= 36
 class VsyncSample;
-#endif
 
 namespace hwc3 {
 enum class Error;
@@ -193,8 +189,6 @@ class ComposerClient : public BnComposerClient {
   ndk::ScopedAStatus notifyExpectedPresent(
       int64_t display, const ClockMonotonicTimestamp& expected_present_time,
       int32_t frame_interval_ns) override;
-
-#if __ANDROID_API__ >= 36
   ndk::ScopedAStatus startHdcpNegotiation(
       int64_t display, const drm::HdcpLevels& levels) override;
   ndk::ScopedAStatus getMaxLayerPictureProfiles(int64_t display,
@@ -204,7 +198,6 @@ class ComposerClient : public BnComposerClient {
                              std::vector<Luts>* out_luts) override;
   ndk::ScopedAStatus getDisplayKnownVsyncSample(int64_t display,
                                                 VsyncSample* sample) override;
-#endif
 
  protected:
   ::ndk::SpAIBinder createBinder() override;
