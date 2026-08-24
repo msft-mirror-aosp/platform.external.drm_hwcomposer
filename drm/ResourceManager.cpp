@@ -236,14 +236,6 @@ void ResourceManager::Init() {
   if (use_backend_hotplug) {
     ALOGI(
         "Backend-driven hotplug enabled; setting per-device hotplug handlers");
-    // Temporarily release MainLock while registering backend hotplug handlers.
-    // This is safe because ResourceManager::Init() is called synchronously
-    // during client initialization before any composition or concurrent
-    // operations begin, and SetHotplugHandler may synchronously replay early
-    // boot hotplug events that acquire MainLock per event (avoiding recursive
-    // mutex deadlock). As a follow up, we can look at removing the lock from
-    // ComposerClient::registerCallback.
-    GetMainLock().unlock();
     for (auto &drm : drms_) {
       DrmDevice *drm_ptr = drm.get();
       auto hotplug_handler = [this, drm_ptr](uint32_t connector_id,
@@ -277,7 +269,6 @@ void ResourceManager::Init() {
       };
       drm->GetBackend().SetHotplugHandler(std::move(hotplug_handler));
     }
-    GetMainLock().lock();
   } else {
     uevent_listener_ = UEventListener::CreateInstance([this] {
       {
