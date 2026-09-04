@@ -153,7 +153,9 @@ void HwcDisplay::SetColorTransformMatrix(
   } else {
     client_ctm_has_offset_ = ColorUtil::HasOffset(color_transform_matrix);
     client_color_matrix_ = std::make_shared<HalColorTransformMatrix>(
-        ColorUtil::ToLinearCtm(color_transform_matrix, color_mode_));
+        use_color_pipeline_
+            ? ColorUtil::ToLinearCtm(color_transform_matrix, color_mode_)
+            : color_transform_matrix);
   }
 
   UpdateColorTransformMatrix();
