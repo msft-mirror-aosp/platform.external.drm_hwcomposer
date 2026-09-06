@@ -225,21 +225,76 @@ void ResourceManager::Init() {
     drm->ResetConnectorsAndCrtcs();
   }
 
-  uevent_listener_ = UEventListener::CreateInstance([this] {
-    {
-      std::scoped_lock lock(GetMainLock());
-      for (auto &drm : drms_) {
-        auto stale_connectors = drm->RefreshConnectors();
-        DetachStalePipelines(stale_connectors);
-      }
-      UpdateFrontendDisplays();
+  bool use_backend_hotplug = false;
+  for (auto &drm : drms_) {
+    if (drm->GetBackend().UseBackendHotplug()) {
+      use_backend_hotplug = true;
+      break;
     }
-    frontend_interface_->FlushHotplugEvents();
-  });
+  }
 
-  UpdateFrontendDisplays();
-  MaybeScheduleDelayedEdidRecovery();
-  frontend_interface_->FlushHotplugEvents();
+  if (use_backend_hotplug) {
+    ALOGI(
+        "Backend-driven hotplug enabled; setting per-device hotplug handlers");
+    // Temporarily release MainLock while registering backend hotplug handlers.
+    // This is safe because ResourceManager::Init() is called synchronously
+    // during client initialization before any composition or concurrent
+    // operations begin, and SetHotplugHandler may synchronously replay early
+    // boot hotplug events that acquire MainLock per event (avoiding recursive
+    // mutex deadlock). As a follow up, we can look at removing the lock from
+    // ComposerClient::registerCallback.
+    GetMainLock().unlock();
+    for (auto &drm : drms_) {
+      DrmDevice *drm_ptr = drm.get();
+      auto hotplug_handler = [this, drm_ptr](uint32_t connector_id,
+                                             bool connected) {
+        {
+          std::scoped_lock lock(GetMainLock());
+          auto stale_connectors = drm_ptr->RefreshConnectors();
+          DetachStalePipelines(stale_connectors);
+          DrmConnector *conn = nullptr;
+          for (const auto &c : drm_ptr->GetConnectors()) {
+            if (c->GetId() == connector_id) {
+              conn = c.get();
+              break;
+            }
+          }
+          if (conn == nullptr) {
+            ALOGW("ResourceManager: connector %u not found on device %s",
+                  connector_id, drm_ptr->GetName().c_str());
+            return;
+          }
+          ProcessHotplugForConnector(conn);
+          if (conn->IsConnected() != connected) {
+            ALOGE(
+                "ResourceManager: connector %u connected state mismatch "
+                "(DRM=%d, backend=%d)",
+                connector_id, conn->IsConnected(), connected);
+          }
+          frontend_interface_->FinalizeDisplayBinding();
+        }
+        frontend_interface_->FlushHotplugEvents();
+      };
+      drm->GetBackend().SetHotplugHandler(std::move(hotplug_handler));
+    }
+    GetMainLock().lock();
+  } else {
+    uevent_listener_ = UEventListener::CreateInstance([this] {
+      {
+        std::scoped_lock lock(GetMainLock());
+        for (auto &drm : drms_) {
+          auto stale_connectors = drm->RefreshConnectors();
+          DetachStalePipelines(stale_connectors);
+        }
+        UpdateFrontendDisplays();
+      }
+      frontend_interface_->FlushHotplugEvents();
+    });
+
+    UpdateFrontendDisplays();
+    MaybeScheduleDelayedEdidRecovery();
+    frontend_interface_->FlushHotplugEvents();
+  }
 
   initialized_ = true;
 }
@@ -248,6 +303,10 @@ void ResourceManager::DeInit() {
   if (!initialized_) {
     ALOGE("Not initialized");
     return;
+  }
+
+  for (auto &drm : drms_) {
+    drm->GetBackend().SetHotplugHandler(nullptr);
   }
 
   CancelDelayedEdidRecovery();
