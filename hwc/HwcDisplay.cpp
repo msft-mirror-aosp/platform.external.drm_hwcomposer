@@ -1627,6 +1627,13 @@ bool HwcDisplay::HasHardwareColorTransform() const {
   if (IsInHeadlessMode()) {
     return false;
   }
+  if (pipeline_ && pipeline_->capabilities) {
+    const auto ctm_override = pipeline_->capabilities
+                                  ->GetHardwareColorTransformOverride();
+    if (ctm_override.has_value()) {
+      return *ctm_override;
+    }
+  }
   return UseColorPipeline() && GetPipe().crtc && GetPipe().crtc->Get() &&
          GetPipe().crtc->Get()->GetCtmProperty() &&
          GetPipe().crtc->Get()->GetCtmOffsetProperty();
