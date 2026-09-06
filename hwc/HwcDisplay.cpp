@@ -47,6 +47,7 @@
 #include <utility>
 #include <vector>
 
+#include "backend/Backend.h"
 #include "backend/BackendDisplayCapabilities.h"
 #include "backend/BackendManager.h"
 #include "bufferinfo/BufferInfo.h"
@@ -775,6 +776,13 @@ void HwcDisplay::SetPipeline(std::shared_ptr<DrmDisplayPipeline> pipeline) {
 
 void HwcDisplay::Deinit() {
   if (pipeline_ != nullptr) {
+    if (pipeline_->connector && pipeline_->connector->Get()) {
+      auto *connector = pipeline_->connector->Get();
+      connector->GetDev()
+          .GetBackend()
+          .SetRefreshCallbackForConnector(connector->GetId(), nullptr);
+    }
+
     AtomicCommitArgs a_args{};
     a_args.composition = std::make_shared<LayerToPlaneJoiningPlan>();
     ExecuteAtomicCommit(a_args);
@@ -918,6 +926,15 @@ bool HwcDisplay::Init() {
           .trigger = [this]() { hwc_->SendRefreshEventToClient(handle_); }};
       flatcon_ = std::make_unique<FlatteningController>(handle_, flatcbk,
                                                         kFlatteningTimeout);
+    }
+
+    if (pipeline_ && pipeline_->connector && pipeline_->connector->Get()) {
+      auto *connector = pipeline_->connector->Get();
+      connector->GetDev()
+          .GetBackend()
+          .SetRefreshCallbackForConnector(connector->GetId(), [this]() {
+            hwc_->SendRefreshEventToClient(handle_);
+          });
     }
 
     if (IsHdcpPropertyPresent()) {

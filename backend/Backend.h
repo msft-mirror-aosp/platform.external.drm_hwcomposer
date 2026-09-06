@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -30,6 +31,8 @@ struct DrmDisplayPipeline;
 
 class Backend {
  public:
+  using RefreshCallback = std::function<void()>;
+
   explicit Backend(DrmDevice &drm);
   virtual ~Backend() = default;
 
@@ -37,6 +40,12 @@ class Backend {
   // creating the CompositionPlanner for this DrmDisplayPipeline.
   virtual std::unique_ptr<DrmDisplayPipeline> CreatePipeline(
       DrmConnector &connector) = 0;
+
+  // Set (or clear if callback is null) a refresh trigger callback for a
+  // connector.
+  virtual void SetRefreshCallbackForConnector(uint32_t /*connector_id*/,
+                                              RefreshCallback /*callback*/) {
+  }
 
   // Get the BufferInfoGetter for the Backend.
   virtual std::unique_ptr<BufferInfoGetter> CreateBufferInfoGetter() = 0;
