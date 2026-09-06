@@ -276,44 +276,55 @@ void ResourceManager::UpdateFrontendDisplays() {
   auto ordered_connectors = GetOrderedConnectors();
 
   for (auto *conn : ordered_connectors) {
-    conn->UpdateModesAndProperties();
-    auto connected = conn->IsConnected();
-    auto attached = attached_pipelines_.count(conn) != 0;
+    ProcessHotplugForConnector(conn);
+  }
+  frontend_interface_->FinalizeDisplayBinding();
+}
 
-    if (connected != attached) {
-      ALOGI("%s connector %s", connected ? "Attaching" : "Detaching",
-            conn->GetName().c_str());
+void ResourceManager::ProcessHotplugForConnector(DrmConnector *conn) {
+  if (conn == nullptr) {
+    return;
+  }
 
-      if (connected) {
-        std::shared_ptr<DrmDisplayPipeline>
-            pipeline = conn->GetDev().GetBackend().CreatePipeline(*conn);
-        ALOGE_IF(pipeline == nullptr,
-                 "Failed to create pipeline for connector %s",
-                 conn->GetName().c_str());
-        if (pipeline) {
-          frontend_interface_->BindDisplay(pipeline);
-          attached_pipelines_[conn] = std::move(pipeline);
-        }
-      } else {
-        auto &pipeline = attached_pipelines_[conn];
-        frontend_interface_->UnbindDisplay(pipeline);
-        attached_pipelines_.erase(conn);
-      }
-    }
+  conn->UpdateModesAndProperties();
+  auto connected = conn->IsConnected();
+  auto it = attached_pipelines_.find(conn);
+  auto attached = (it != attached_pipelines_.end());
+
+  if (connected != attached) {
+    ALOGI("%s connector %s", connected ? "Attaching" : "Detaching",
+          conn->GetName().c_str());
+
     if (connected) {
+      std::shared_ptr<DrmDisplayPipeline>
+          pipeline = conn->GetDev().GetBackend().CreatePipeline(*conn);
+      ALOGE_IF(pipeline == nullptr,
+               "Failed to create pipeline for connector %s",
+               conn->GetName().c_str());
+      if (pipeline) {
+        frontend_interface_->BindDisplay(pipeline);
+        attached_pipelines_[conn] = std::move(pipeline);
+      }
+    } else {
+      frontend_interface_->UnbindDisplay(it->second);
+      attached_pipelines_.erase(it);
+    }
+  }
+  if (connected) {
+    auto attached_it = attached_pipelines_.find(conn);
+    if (attached_it != attached_pipelines_.end()) {
       if (!conn->IsLinkStatusGood()) {
-        frontend_interface_->NotifyDisplayLinkStatus(attached_pipelines_[conn]);
+        frontend_interface_->NotifyDisplayLinkStatus(attached_it->second);
       }
 
       // If content protection is not enabled anymore, inform frontend so it
       // can terminate HDCP handling for this display.
       if (conn->UpdateContentProtection() &&
           !conn->IsContentProtectionEnabled()) {
-        frontend_interface_->NotifyHdcpTermination(attached_pipelines_[conn]);
+        frontend_interface_->NotifyHdcpTermination(attached_it->second);
       }
     }
   }
-  frontend_interface_->FinalizeDisplayBinding();
 }
 
 void ResourceManager::DetachStalePipelines(
