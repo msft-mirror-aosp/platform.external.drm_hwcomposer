@@ -166,6 +166,7 @@ void ResourceManager::Init() {
   BackendManager::GetInstance().InitializeBackends();
 
   color_pipeline_enabled_ = Properties::UseColorPipeline();
+  force_ctm_handles_offset_ = Properties::ForceCtmHandlesOffset();
   force_color_mode_ = Properties::ForceColorMode();
   persistent_hdr_enabled_ = Properties::PersistentHdrEnabled();
   external_hdr_enabled_ = Properties::ExternalHdrEnabled();

@@ -1421,7 +1421,8 @@ std::optional<AtomicCommitArgs> HwcDisplay::CreateFrameUpdateCommit(
 
   // Client CTM with offset cannot be processed by CTM prop. Only apply render
   // intent CTM which will never have offset.
-  if (client_ctm_has_offset_ && !HasHardwareColorTransform()) {
+  if (client_ctm_has_offset_ && !(HasHardwareColorTransform() ||
+                                  hwc_->GetResMan().ForceCtmHandlesOffset())) {
     a_args.color_matrix = render_intent_matrix_;
   }
 
