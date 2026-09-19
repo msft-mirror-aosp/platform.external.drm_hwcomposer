@@ -46,6 +46,7 @@ class Backend {
 
   // Set (or clear if callback is null) a refresh trigger callback for a
   // connector.
+  // NOLINTBEGIN(performance-unnecessary-value-param)
   virtual void SetRefreshCallbackForConnector(uint32_t /*connector_id*/,
                                               RefreshCallback /*callback*/) {
   }
@@ -54,6 +55,7 @@ class Backend {
   // call the passed function before SetHotplugHandler returns.
   virtual void SetHotplugHandler(HotplugHandler /*handler*/) {
   }
+  // NOLINTEND(performance-unnecessary-value-param)
 
   // Returns true if this backend provides its own hotplug events via
   // SetHotplugHandler, or false if UEventListener and standard polling
