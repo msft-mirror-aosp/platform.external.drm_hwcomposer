@@ -171,11 +171,10 @@ std::optional<uint32_t> SdmAtomicStateManager::GetSdmConfigId(
   int64_t min_vsync_diff = std::numeric_limits<int64_t>::max();
 
   for (const auto& [config_idx, sdm_config] : sdm_configs_) {
-    if (drm_width == sdm_config.x_pixels &&
-        drm_height == sdm_config.y_pixels &&
+    if (drm_width == sdm_config.x_pixels && drm_height == sdm_config.y_pixels &&
         drm_fps == sdm_config.fps) {
-      int64_t diff = std::abs(
-          drm_vsync - static_cast<int64_t>(sdm_config.vsync_period_ns));
+      int64_t diff = std::abs(drm_vsync -
+                              static_cast<int64_t>(sdm_config.vsync_period_ns));
       if (diff < min_vsync_diff) {
         min_vsync_diff = diff;
         best_config_idx = config_idx;
@@ -387,10 +386,12 @@ bool SdmAtomicStateManager::IsSeamlessConfigChange(const DrmMode& mode) const {
     return false;
   }
 
-  int current_group = settings_intf_->GetDisplayConfigGroup(
-      sdm_display_id_, current_config_it->second);
-  int target_group = settings_intf_->GetDisplayConfigGroup(
-      sdm_display_id_, target_config_it->second);
+  int current_group = settings_intf_
+                          ->GetDisplayConfigGroup(sdm_display_id_,
+                                                  current_config_it->second);
+  int target_group = settings_intf_
+                         ->GetDisplayConfigGroup(sdm_display_id_,
+                                                 target_config_it->second);
 
   bool seamless = (current_group == target_group) && (current_group != -1);
   ALOGI(

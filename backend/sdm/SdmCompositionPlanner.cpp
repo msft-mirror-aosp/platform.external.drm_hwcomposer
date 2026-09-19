@@ -316,14 +316,15 @@ auto SdmCompositionPlanner::ValidateDisplay(const ICompositorDisplay* display)
   }
 
   // TODO: Plumb the validation and flattening stats.
-  return {.composition = ValidatedComposition{
-      .composition_types = composition_type_map,
-      .punch_out_layers = punch_out_layers,
-      .composition_plan = composition_plan,
-      .flatten_reason = FlattenReason::kNone,
-      .cursor_plane_validated = std::nullopt,
-  },
-  .short_circuited = false};
+  return {.composition =
+              ValidatedComposition{
+                  .composition_types = composition_type_map,
+                  .punch_out_layers = punch_out_layers,
+                  .composition_plan = composition_plan,
+                  .flatten_reason = FlattenReason::kNone,
+                  .cursor_plane_validated = std::nullopt,
+              },
+          .short_circuited = false};
 }
 
 void SdmCompositionPlanner::UpdateLayerMapping(

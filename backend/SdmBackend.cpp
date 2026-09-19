@@ -423,7 +423,8 @@ class SdmAtomicCommitSink : public AtomicCommitSink {
     return CommitStatus::InternalFailure();
   }
 
-  CommitStatusOr<std::vector<std::pair<AtomicStateManager*, AtomicCommitResult>>>
+  CommitStatusOr<
+      std::vector<std::pair<AtomicStateManager*, AtomicCommitResult>>>
   ExecuteAtomicCommit(
       const std::vector<std::pair<AtomicStateManager*, AtomicCommitArgs>>& args)
       override {
@@ -732,14 +733,14 @@ std::optional<SdmBackend::SdmDisplayId> SdmBackend::GetBuiltinDisplayId() {
 // Register the SDM backend for msm_drm
 // NOLINTNEXTLINE(cert-err58-cpp)
 static bool register_sdm = []() {
-  BackendManager::GetInstance().Register(
-      kDriverName,
-      {
-          .creator = [](DrmDevice& drm) -> std::unique_ptr<Backend> {
-            return std::make_unique<SdmBackend>(drm);
-          },
-          .init = []() -> bool { return SdmBackend::Init(); },
-      });
+  BackendManager::GetInstance()
+      .Register(kDriverName,
+                {
+                    .creator = [](DrmDevice& drm) -> std::unique_ptr<Backend> {
+                      return std::make_unique<SdmBackend>(drm);
+                    },
+                    .init = []() -> bool { return SdmBackend::Init(); },
+                });
   return true;
 }();
 
