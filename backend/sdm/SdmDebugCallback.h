@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <cstdarg>
+
 #include <debug_callback_intf.h>
 
 namespace android::drm_hwcomposer {
@@ -26,12 +28,12 @@ class SdmDebugCallback : public sdm::DebugCallbackIntf {
   void Log(sdm::DebugLogType type, const char *log_tag, const char *fmt,
            std::va_list &args) override;
 
-  int GetProperty(const char *property_name, int *value);
+  int GetProperty(const char *property_name, int *value) override;
   int GetProperty(const char *property_name, char *value) override;
   void BeginTrace(const char *class_name, const char *function_name,
                   const char *custom_string) override;
   void EndTrace() override;
-  void ATrace(const char *custom_string, const int bit) override;
+  void ATrace(const char *custom_string, int bit) override;
 };
 
 }  // namespace android::drm_hwcomposer

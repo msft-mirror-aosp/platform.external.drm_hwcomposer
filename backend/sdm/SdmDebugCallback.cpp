@@ -14,18 +14,20 @@
  * limitations under the License.
  */
 
-#define LOG_TAG "drmhwc"
+#define LOG_TAG "drmhwc"  // NOLINT(cppcoreguidelines-macro-usage)
 
 #include "SdmDebugCallback.h"
 
-#include <string>
+#include <cstdarg>
+#include <cstdio>
 
+#include <android/log.h>
 #include <cutils/properties.h>
 #include <cutils/trace.h>
+#include <linux/limits.h>
 
 #include <core/sdm_types.h>
-
-#include "utils/log.h"
+#include <debug_callback_intf.h>
 
 namespace android::drm_hwcomposer {
 namespace {
@@ -71,7 +73,7 @@ int SdmDebugCallback::GetProperty(const char *property_name, char *value) {
 void SdmDebugCallback::BeginTrace(const char *class_name,
                                   const char *function_name,
                                   const char *custom_string) {
-  if (atrace_is_tag_enabled(ATRACE_TAG_GRAPHICS)) {
+  if (atrace_is_tag_enabled(ATRACE_TAG_GRAPHICS) != 0) {
     char name[PATH_MAX] = {0};
     snprintf(name, sizeof(name), "%s::%s::%s", class_name, function_name,
              custom_string);

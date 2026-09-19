@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include <cinttypes>
+#include <cstdint>
 #include <map>
 
 #include "compositor/CompositionPlanner.h"

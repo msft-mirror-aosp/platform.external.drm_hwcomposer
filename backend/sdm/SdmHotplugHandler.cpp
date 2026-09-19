@@ -14,11 +14,13 @@
  * limitations under the License.
  */
 
-#define LOG_TAG "drmhwc"
+#define LOG_TAG "drmhwc"  // NOLINT(cppcoreguidelines-macro-usage)
 
 #include "backend/sdm/SdmHotplugHandler.h"
 
 #include <chrono>
+#include <cstdint>
+#include <mutex>
 #include <thread>
 #include <utility>
 
@@ -99,7 +101,9 @@ void SdmHotplugHandler::DispatchLoop() {
         // hotplug more reliable, by avoiding suspected issues in the Android
         // Framework resulting in the disconnect event being dropped. Tested
         // over multiple plug/unplug iterations.
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        constexpr int kDisconnectDelayMs = 100;
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(kDisconnectDelayMs));
       }
       current_handler(next_event.connector_id, next_event.connected);
     }

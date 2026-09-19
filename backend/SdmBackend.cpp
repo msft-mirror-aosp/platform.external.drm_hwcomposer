@@ -14,37 +14,53 @@
  * limitations under the License.
  */
 
-#define LOG_TAG "drmhwc"
+#define LOG_TAG "drmhwc"  // NOLINT(cppcoreguidelines-macro-usage)
 
 #include "SdmBackend.h"
 
 #include <cinttypes>
-#include <deque>
-#include <list>
-#include <mutex>
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
-#include <cutils/properties.h>
-#include <ui/GraphicBufferMapper.h>
+#include <cutils/native_handle.h>
 #include <ui/GraphicTypes.h>
+#include <xf86drmMode.h>
 
+#include <core/sdm_types.h>
+#include <private/generic_payload.h>
 #include <sdm_compositor_cb_intf.h>
-#include <sdm_interface_factory_v2.h>
-// Need to #include <sdm_interface_factory_v2.h> first to get the base classes'
-// definitions.
+#include <sdm_compositor_sideband_cb_intf.h>
+#include <sdm_display_intf_caps.h>
+#include <sdm_display_intf_drawcycle.h>
+#include <sdm_display_intf_layer_builder.h>
+#include <sdm_display_intf_lifecycle.h>
+#include <sdm_display_intf_settings.h>
+#include <sdm_display_intf_sideband.h>
+#include <sdm_interface_factory.h>
+// Need to #include <sdm_display_intf_layer_builder.h> (or
+// <sdm_interface_factory.h>) first to get the base classes' definitions.
 #include <hwc_buffer_allocator.h>
 #include <hwc_socket_handler.h>
 
+#include "backend/Backend.h"
+#include "backend/BackendDisplayCapabilities.h"
 #include "backend/BackendManager.h"
 #include "backend/sdm/SdmAtomicStateManager.h"
 #include "backend/sdm/SdmCompositionPlanner.h"
 #include "backend/sdm/SdmDebugCallback.h"
+#include "backend/sdm/SdmHotplugHandler.h"
+#include "backend/sdm/SdmToConnectorMapper.h"
 #include "backend/sdm/SnapAllocHandle.h"
 #include "backend/sdm/sdm_error.h"
 #include "bufferinfo/BufferInfoMapperMetadata.h"
 #include "bufferinfo/GrallocBufferHandle.h"
-#include "compositor/CompositionPlanner.h"
+#include "compositor/DisplayInfo.h"
 #include "compositor/LayerToPlaneJoiningPlan.h"
+#include "drm/AtomicStateManager.h"
 #include "drm/CommitStatus.h"
 #include "drm/DrmAtomicStateManager.h"
 #include "drm/DrmConnector.h"
@@ -62,38 +78,37 @@ namespace android::drm_hwcomposer {
 using sdm_error::ErrorToString;
 
 // Define static members
-std::shared_ptr<sdm::SDMDisplayLifeCycleIntf> SdmBackend::life_cycle_intf_;
-std::shared_ptr<sdm::SDMDisplayLayerBuilderIntf>
-    SdmBackend::layer_builder_intf_;
-std::shared_ptr<sdm::SDMDisplayCapsIntf> SdmBackend::display_caps_intf_;
-std::shared_ptr<sdm::SDMDisplayDrawCycleIntf> SdmBackend::draw_cycle_intf_;
-std::shared_ptr<sdm::SDMDisplaySettingsIntf> SdmBackend::settings_intf_;
-std::shared_ptr<sdm::SDMDisplaySideBandIntf> SdmBackend::sideband_intf_;
+std::shared_ptr<sdm::SDMDisplayLifeCycleIntf> SdmBackend::life_cycle_intf;
+std::shared_ptr<sdm::SDMDisplayLayerBuilderIntf> SdmBackend::layer_builder_intf;
+std::shared_ptr<sdm::SDMDisplayCapsIntf> SdmBackend::display_caps_intf;
+std::shared_ptr<sdm::SDMDisplayDrawCycleIntf> SdmBackend::draw_cycle_intf;
+std::shared_ptr<sdm::SDMDisplaySettingsIntf> SdmBackend::settings_intf;
+std::shared_ptr<sdm::SDMDisplaySideBandIntf> SdmBackend::sideband_intf;
 
-std::unique_ptr<sdm::HWCBufferAllocator> SdmBackend::buffer_allocator_;
-std::unique_ptr<sdm::HWCSocketHandler> SdmBackend::socket_handler_;
-std::unique_ptr<sdm::DebugCallbackIntf> SdmBackend::debug_callback_;
-std::unique_ptr<sdm::SDMCompositorCbIntf> SdmBackend::callback_interface_;
+std::unique_ptr<sdm::HWCBufferAllocator> SdmBackend::buffer_allocator;
+std::unique_ptr<sdm::HWCSocketHandler> SdmBackend::socket_handler;
+std::unique_ptr<sdm::DebugCallbackIntf> SdmBackend::debug_callback;
+std::unique_ptr<sdm::SDMCompositorCbIntf> SdmBackend::callback_interface;
 std::unique_ptr<sdm::SDMSideBandCompositorCbIntf>
-    SdmBackend::sideband_callbacks_;
+    SdmBackend::sideband_callbacks;
 
-std::unique_ptr<SdmToConnectorMapper> SdmBackend::connector_mapper_;
-SdmHotplugHandler SdmBackend::hotplug_handler_;
-bool SdmBackend::initialized_ = false;
+std::unique_ptr<SdmToConnectorMapper> SdmBackend::connector_mapper;
+SdmHotplugHandler SdmBackend::hotplug_handler;
+bool SdmBackend::initialized = false;
 
 void SdmBackend::SetRefreshCallbackForConnector(uint32_t connector_id,
                                                 RefreshCallback callback) {
-  if (connector_mapper_) {
-    connector_mapper_->SetRefreshCallback(connector_id, std::move(callback));
+  if (connector_mapper) {
+    connector_mapper->SetRefreshCallback(connector_id, std::move(callback));
   }
 }
 
 void SdmBackend::SetHotplugHandler(HotplugHandler handler) {
   bool enable = (handler != nullptr);
-  hotplug_handler_.SetHotplugHandler(std::move(handler));
-  if (life_cycle_intf_) {
-    life_cycle_intf_->RegisterCompositorCallback(callback_interface_.get(),
-                                                 enable);
+  hotplug_handler.SetHotplugHandler(std::move(handler));
+  if (life_cycle_intf) {
+    life_cycle_intf->RegisterCompositorCallback(callback_interface.get(),
+                                                enable);
   }
 }
 
@@ -203,11 +218,11 @@ class StubCallbackInterface : public sdm::SDMCompositorCbIntf {
           in_display, in_connected);
     std::optional<uint32_t> connector_id;
     if (in_connected) {
-      if (connector_mapper_) {
+      if (connector_mapper_ != nullptr) {
         connector_id = connector_mapper_->Register(in_display);
       }
     } else {
-      if (connector_mapper_) {
+      if (connector_mapper_ != nullptr) {
         connector_id = connector_mapper_->GetConnectorIdForSdm(in_display);
         connector_mapper_->Unregister(in_display);
       }
@@ -225,27 +240,27 @@ class StubCallbackInterface : public sdm::SDMCompositorCbIntf {
 
   void OnRefresh(uint64_t in_display) override {
     ALOGV("StubCallbackInterface::OnRefresh(%" PRIu64 ")", in_display);
-    if (connector_mapper_) {
+    if (connector_mapper_ != nullptr) {
       connector_mapper_->OnRefresh(in_display);
     }
   }
 
-  void OnVsync(uint64_t in_display, int64_t in_timestamp,
-               int32_t in_vsync_period_nanos) override {
+  void OnVsync(uint64_t /*in_display*/, int64_t /*in_timestamp*/,
+               int32_t /*in_vsync_period_nanos*/) override {
     ALOGV("*STUB* StubCallbackInterface::OnVsync");
   }
 
-  void OnSeamlessPossible(uint64_t in_display) override {
+  void OnSeamlessPossible(uint64_t /*in_display*/) override {
     ALOGV("*STUB* StubCallbackInterface::OnSeamlessPossible");
   }
 
-  void OnVsyncIdle(uint64_t in_display) override {
+  void OnVsyncIdle(uint64_t /*in_display*/) override {
     ALOGV("*STUB* StubCallbackInterface::OnVsyncIdle");
   }
 
   void OnVsyncPeriodTimingChanged(
-      uint64_t in_display,
-      const sdm::SDMVsyncPeriodChangeTimeline& timeline) override {
+      uint64_t /*in_display*/,
+      const sdm::SDMVsyncPeriodChangeTimeline& /*timeline*/) override {
     ALOGV("*STUB* StubCallbackInterface::OnVsyncPeriodTimingChanged");
   }
 
@@ -358,7 +373,7 @@ class StubSideBandCompositorCallbacks
   }
 
   sdm::nsecs_t SystemTime(int clock) override {
-    ALOGW_IF(clock != SYSTEM_TIME_MONOTONIC,
+    ALOGW_IF(clock != sdm::SYSTEM_TIME_MONOTONIC,
              "SystemTime not implemented for clock: %d", clock);
     int64_t time_ns = ResourceManager::GetTimeMonotonicNs();
     return static_cast<sdm::nsecs_t>(time_ns);
@@ -376,7 +391,7 @@ class StubSideBandCompositorCallbacks
 // out the importer.
 class StubFbImporter : public DrmFbImporter {
  public:
-  auto GetOrCreateFbId(BufferInfo* bo)
+  auto GetOrCreateFbId(BufferInfo* /*bo*/)
       -> std::shared_ptr<DrmFbIdHandle> override {
     return nullptr;
   }
@@ -408,7 +423,8 @@ class SdmAtomicCommitSink : public AtomicCommitSink {
     // try to identify when drm_hwcomposer is probing for seamless config
     // changes.
     if (commit_args.display_mode.has_value() && commit_args.seamless) {
-      auto sdm_atomic_state_manager = static_cast<SdmAtomicStateManager*>(
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
+      auto* sdm_atomic_state_manager = static_cast<SdmAtomicStateManager*>(
           state_manager);
       if (sdm_atomic_state_manager->IsSeamlessConfigChange(
               *commit_args.display_mode)) {
@@ -431,7 +447,8 @@ class SdmAtomicCommitSink : public AtomicCommitSink {
     std::vector<std::pair<AtomicStateManager*, AtomicCommitResult>> results;
     ALOGW_IF(args.size() > 1, "Multi-display atomic commit not supported");
     for (auto [state_manager, commit_args] : args) {
-      auto sdm_atomic_state_manager = static_cast<SdmAtomicStateManager*>(
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
+      auto* sdm_atomic_state_manager = static_cast<SdmAtomicStateManager*>(
           state_manager);
       auto result = sdm_atomic_state_manager->ExecuteAtomicCommit(commit_args);
       if (!result.has_value()) {
@@ -448,9 +465,10 @@ class SdmAtomicCommitSink : public AtomicCommitSink {
   }
 };
 
-// Find an unused primary plane that's compatible with the crtc and bind it to
-// the pipeline.
+// Returns true if a primary plane was found and bound to the pipeline, false
+// otherwise.
 bool BindPrimaryPlane(DrmDisplayPipeline* pipeline) {
+  // Find planes that are compatible with the crtc.
   std::vector<DrmPlane*> compatible_planes;
   for (const auto& plane : pipeline->device->GetPlanes()) {
     if (plane->IsCrtcSupported(*pipeline->crtc->Get())) {
@@ -519,7 +537,7 @@ DrmCrtc* GetCrtcForEncoder(DrmDevice& device, DrmEncoder& encoder) {
   return nullptr;
 }
 
-const char* kDriverName = "msm_drm";
+constexpr const char* kDriverName = "msm_drm";
 
 }  // namespace
 
@@ -531,7 +549,7 @@ SdmBackend::SdmBackend(DrmDevice& drm) : Backend(drm) {
 SdmBackend::~SdmBackend() = default;
 
 bool SdmBackend::Init() {
-  if (initialized_) {
+  if (initialized) {
     ALOGI("SdmBackend already initialized. Skipping SDM init.");
     return true;
   }
@@ -543,50 +561,50 @@ bool SdmBackend::Init() {
     return false;
   }
   // Create all the required interfaces from the SDMInterfaceFactory.
-  display_caps_intf_ = factory->CreateCapsIntf();
-  if (display_caps_intf_ == nullptr) {
+  display_caps_intf = factory->CreateCapsIntf();
+  if (display_caps_intf == nullptr) {
     ALOGE("CreateCapsIntf failed");
     return false;
   }
-  draw_cycle_intf_ = factory->CreateDrawCycleIntf();
-  if (draw_cycle_intf_ == nullptr) {
+  draw_cycle_intf = factory->CreateDrawCycleIntf();
+  if (draw_cycle_intf == nullptr) {
     ALOGE("CreateDrawCycleIntf failed");
     return false;
   }
-  layer_builder_intf_ = factory->CreateLayerBuilderIntf();
-  if (layer_builder_intf_ == nullptr) {
+  layer_builder_intf = factory->CreateLayerBuilderIntf();
+  if (layer_builder_intf == nullptr) {
     ALOGE("CreateLayerBuilderIntf failed");
     return false;
   }
-  settings_intf_ = factory->CreateSettingsIntf();
-  if (settings_intf_ == nullptr) {
+  settings_intf = factory->CreateSettingsIntf();
+  if (settings_intf == nullptr) {
     ALOGE("CreateSettingsIntf failed");
     return false;
   }
-  life_cycle_intf_ = factory->CreateLifeCycleIntf();
-  if (life_cycle_intf_ == nullptr) {
+  life_cycle_intf = factory->CreateLifeCycleIntf();
+  if (life_cycle_intf == nullptr) {
     ALOGE("CreateLifeCycleIntf failed");
     return false;
   }
-  sideband_intf_ = factory->CreateSideBandIntf();
-  if (sideband_intf_ == nullptr) {
+  sideband_intf = factory->CreateSideBandIntf();
+  if (sideband_intf == nullptr) {
     ALOGE("CreateSideBandIntf failed");
     return false;
   }
 
   // Instantiate the required interfaces needed for initializing the interfaces
   // that were created above.
-  buffer_allocator_ = std::make_unique<sdm::HWCBufferAllocator>();
-  socket_handler_ = std::make_unique<sdm::HWCSocketHandler>();
-  debug_callback_ = std::make_unique<SdmDebugCallback>();
-  connector_mapper_ = std::make_unique<SdmToConnectorMapper>(
-      display_caps_intf_.get());
-  callback_interface_ = std::make_unique<
-      StubCallbackInterface>(connector_mapper_.get(), &hotplug_handler_);
-  sideband_callbacks_ = std::make_unique<StubSideBandCompositorCallbacks>();
+  buffer_allocator = std::make_unique<sdm::HWCBufferAllocator>();
+  socket_handler = std::make_unique<sdm::HWCSocketHandler>();
+  debug_callback = std::make_unique<SdmDebugCallback>();
+  connector_mapper = std::make_unique<SdmToConnectorMapper>(
+      display_caps_intf.get());
+  callback_interface = std::make_unique<
+      StubCallbackInterface>(connector_mapper.get(), &hotplug_handler);
+  sideband_callbacks = std::make_unique<StubSideBandCompositorCallbacks>();
 
   // Initialize the interface with snapalloc.
-  if (!SnapAllocHandle::Init(debug_callback_.get())) {
+  if (!SnapAllocHandle::Init(debug_callback.get())) {
     ALOGE("Failed to Initialize SnapMapper");
     return false;
   }
@@ -595,18 +613,18 @@ bool SdmBackend::Init() {
   BufferInfoGetter::Init(std::make_unique<SnapAllocBufferInfoGetter>());
 
   // Initialize the lifecycle interface.
-  auto display_error = life_cycle_intf_->Init(buffer_allocator_.get(),
-                                              socket_handler_.get(),
-                                              debug_callback_.get());
+  auto display_error = life_cycle_intf->Init(buffer_allocator.get(),
+                                             socket_handler.get(),
+                                             debug_callback.get());
   if (display_error != sdm::kErrorNone) {
     ALOGE("lifecycleintf Init failed with error %s",
           ErrorToString(display_error).c_str());
     return false;
   }
-  life_cycle_intf_->RegisterSideBandCallback(sideband_callbacks_.get(), true);
+  life_cycle_intf->RegisterSideBandCallback(sideband_callbacks.get(), true);
 
   ALOGI("Finished initializing SdmBackend");
-  initialized_ = true;
+  initialized = true;
   return true;
 }
 
@@ -615,6 +633,7 @@ std::unique_ptr<DrmDisplayPipeline> SdmBackend::CreatePipeline(
   ALOGI("SdmBackend::CreatePipeline: %s", connector.GetName().c_str());
 
   // Don't create pipelines for virtual connectors.
+  // NOLINTNEXTLINE(abseil-string-find-str-contains)
   if (connector.GetName().find("Virtual-") != std::string::npos) {
     ALOGI("Found virtual connector. Returning null pipeline.");
     return nullptr;
@@ -669,25 +688,25 @@ std::unique_ptr<DrmDisplayPipeline> SdmBackend::CreatePipeline(
   }
 
   // Initialize the layer builder for this display.
-  auto display_error = layer_builder_intf_->Init(buffer_allocator_.get(),
-                                                 sdm_display_id.value());
+  auto display_error = layer_builder_intf->Init(buffer_allocator.get(),
+                                                sdm_display_id.value());
   if (display_error != sdm::kErrorNone) {
-    ALOGE("layer_builder_intf_ Init failed with error %s",
+    ALOGE("layer_builder_intf Init failed with error %s",
           ErrorToString(display_error).c_str());
     return nullptr;
   }
 
   // Construct backend implementations.
   auto state_manager = std::make_unique<
-      SdmAtomicStateManager>(sdm_display_id.value(), life_cycle_intf_.get(),
-                             draw_cycle_intf_.get(), settings_intf_.get());
+      SdmAtomicStateManager>(sdm_display_id.value(), life_cycle_intf.get(),
+                             draw_cycle_intf.get(), settings_intf.get());
   pipe->capabilities = std::make_unique<
       SdmDisplayCapabilities>(sdm_display_id.value(), state_manager.get(),
-                              display_caps_intf_.get());
+                              display_caps_intf.get());
   pipe->atomic_state_manager = std::move(state_manager);
   pipe->planner = std::make_unique<
-      SdmCompositionPlanner>(sdm_display_id.value(), layer_builder_intf_.get(),
-                             draw_cycle_intf_.get());
+      SdmCompositionPlanner>(sdm_display_id.value(), layer_builder_intf.get(),
+                             draw_cycle_intf.get());
   return pipe;
 }
 
@@ -698,12 +717,12 @@ std::unique_ptr<AtomicCommitSink> SdmBackend::CreateAtomicCommitSink() {
 std::optional<std::string> SdmBackend::Dump() {
   uint32_t out_size = 0;
   std::string out_dump;
-  sideband_intf_->Dump(&out_size, nullptr);
+  sideband_intf->Dump(&out_size, nullptr);
   if (out_size == 0) {
     return std::nullopt;
   }
   out_dump.resize(out_size + 1);
-  sideband_intf_->Dump(&out_size, out_dump.data());
+  sideband_intf->Dump(&out_size, out_dump.data());
   out_dump.resize(out_size);
   return out_dump;
 }
@@ -718,8 +737,8 @@ std::optional<SdmBackend::SdmDisplayId> SdmBackend::GetDisplayIdForConnector(
     return GetBuiltinDisplayId();
   }
 
-  if (connector_mapper_) {
-    return connector_mapper_->GetSdmIdForConnector(connector.GetId());
+  if (connector_mapper) {
+    return connector_mapper->GetSdmIdForConnector(connector.GetId());
   }
   return std::nullopt;
 }
@@ -731,8 +750,8 @@ std::optional<SdmBackend::SdmDisplayId> SdmBackend::GetBuiltinDisplayId() {
 }
 
 // Register the SDM backend for msm_drm
-// NOLINTNEXTLINE(cert-err58-cpp)
-static bool register_sdm = []() {
+// NOLINTNEXTLINE(cert-err58-cpp,readability-identifier-naming)
+static const bool kRegisterSdm = []() {
   BackendManager::GetInstance()
       .Register(kDriverName,
                 {

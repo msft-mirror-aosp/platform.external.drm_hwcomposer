@@ -23,7 +23,7 @@
 
 namespace sdm {
 class DebugCallbackIntf;
-}
+}  // namespace sdm
 
 namespace vendor::qti::hardware::display::snapalloc {
 class SnapHandle;

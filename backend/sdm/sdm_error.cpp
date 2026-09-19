@@ -16,6 +16,10 @@
 
 #include "backend/sdm/sdm_error.h"
 
+#include <string>
+
+#include <core/sdm_types.h>
+
 namespace android::drm_hwcomposer::sdm_error {
 std::string ErrorToString(sdm::DisplayError error) {
   switch (error) {

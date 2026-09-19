@@ -17,16 +17,21 @@
 #include "backend/sdm/SnapAllocHandle.h"
 
 #include <dlfcn.h>
-#include <fcntl.h>
+#include <fcntl.h>  // NOLINT(misc-include-cleaner)
 
 #include <functional>
+#include <memory>
+#include <string>
 
+#include <cutils/native_handle.h>
 #include <ui/GraphicBufferMapper.h>
+#include <utils/Errors.h>
 
+#include <Error.h>
 #include <ISnapMapper.h>
 #include <SnapHandle.h>
-#include <core/sdm_types.h>
 
+#include "bufferinfo/GrallocBufferHandle.h"
 #include "utils/log.h"
 
 using ISnapMapper = vendor::qti::hardware::display::snapalloc::ISnapMapper;
@@ -40,11 +45,12 @@ namespace {
 // than re-defining here.
 SnapHandle* ConvertToSnapHandle(const buffer_handle_t handle) {
   SnapHandle* snap_handle = snap_handle_create(handle->numFds, handle->numInts);
-  if (snap_handle) {
-    for (size_t i = 0; i < handle->numFds; ++i) {
+  if (snap_handle != nullptr) {
+    for (int i = 0; i < handle->numFds; ++i) {
+      // NOLINTNEXTLINE(misc-include-cleaner)
       snap_handle->buffer_data[i] = fcntl(handle->data[i], F_DUPFD_CLOEXEC, 0);
     }
-    for (size_t i = 0; i < handle->numInts; ++i) {
+    for (int i = 0; i < handle->numInts; ++i) {
       snap_handle
           ->buffer_data[i + handle->numFds] = handle->data[handle->numFds + i];
     }
@@ -59,22 +65,25 @@ using SnapMapperFactoryFcn = std::function<std::shared_ptr<ISnapMapper>(
 SnapMapperFactoryFcn GetSnapMapperFcn() {
   const std::string
       snapalloc_lib_name = "vendor.qti.hardware.display.snapalloc-impl.so";
-  void* snap_impl_lib_ = ::dlopen(snapalloc_lib_name.c_str(), RTLD_NOW);
-  if (!snap_impl_lib_) {
+  void* snap_impl_lib = ::dlopen(snapalloc_lib_name.c_str(), RTLD_NOW);
+  if (snap_impl_lib == nullptr) {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
     ALOGE("Dlopen error for snapalloc impl: %s", dlerror());
   }
 
-  std::shared_ptr<ISnapMapper> (*LINK_FETCH_ISnapMapper)(
+  std::shared_ptr<ISnapMapper> (*link_fetch_isnap_mapper)(
       sdm::DebugCallbackIntf*) = nullptr;
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
   *reinterpret_cast<void**>(
-      &LINK_FETCH_ISnapMapper) = ::dlsym(snap_impl_lib_, "FETCH_ISnapMapper");
+      &link_fetch_isnap_mapper) = ::dlsym(snap_impl_lib, "FETCH_ISnapMapper");
 
-  ALOGE_IF(LINK_FETCH_ISnapMapper == nullptr,
+  ALOGE_IF(link_fetch_isnap_mapper == nullptr,
            "Failed to get snapalloc instances.");
-  return LINK_FETCH_ISnapMapper;
+  return link_fetch_isnap_mapper;
 }
 
 // TODO: Confirm that this is threadsafe.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::shared_ptr<ISnapMapper> g_snap_mapper;
 
 }  // namespace

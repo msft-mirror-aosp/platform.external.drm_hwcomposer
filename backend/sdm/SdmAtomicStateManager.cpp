@@ -14,23 +14,36 @@
  * limitations under the License.
  */
 
-#define LOG_TAG "drmhwc"
+#define LOG_TAG "drmhwc"  // NOLINT(cppcoreguidelines-macro-usage)
 
 #include "backend/sdm/SdmAtomicStateManager.h"
 
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
+#include <vector>
+
+#include <core/buffer_allocator.h>  // IWYU pragma: keep
+#include <core/sdm_types.h>
+#include <sdm_display_intf_drawcycle.h>
+#include <sdm_display_intf_lifecycle.h>
+#include <sdm_display_intf_settings.h>
+#include <utils/fence.h>
 
 #include "backend/sdm/SnapAllocHandle.h"
 #include "backend/sdm/sdm_error.h"
+#include "compositor/DisplayInfo.h"
 #include "compositor/LayerData.h"
 #include "compositor/LayerToPlaneJoiningPlan.h"
+#include "drm/AtomicStateManager.h"
+#include "drm/DrmMode.h"
 #include "hwc/HwcDisplay.h"
 #include "utils/ColorUtil.h"
+#include "utils/fd.h"
 #include "utils/log.h"
-
-#include <sdm_interface_factory_v2.h>
 
 namespace android::drm_hwcomposer {
 
@@ -200,7 +213,7 @@ std::vector<DrmMode> SdmAtomicStateManager::FilterModes(
 }
 
 std::unique_ptr<AtomicRequest> SdmAtomicStateManager::GetAtomicModeReqForArgs(
-    AtomicCommitArgs& args) {
+    AtomicCommitArgs& /*args*/) {
   ALOGE("GetAtomicModeReqForArgs not implemented for SdmAtomicStateManager");
   return nullptr;
 }
@@ -235,7 +248,7 @@ std::optional<AtomicCommitResult> SdmAtomicStateManager::ExecuteAtomicCommit(
           return std::nullopt;
         }
       }
-      active_sdm_config_id_ = *sdm_config_idx;
+      active_sdm_config_id_ = sdm_config_idx;
     } else {
       ALOGE("Failed to find SDM config for DRM mode %s (vsync %d ns)",
             args.display_mode->GetName().c_str(),
@@ -268,7 +281,7 @@ std::optional<AtomicCommitResult> SdmAtomicStateManager::ExecuteAtomicCommit(
       color_mode = it->second;
     }
     // Hardcode to colorimetric render intent.
-    const int32_t kColorimetricRenderIntent = 0;
+    constexpr int32_t kColorimetricRenderIntent = 0;
     auto display_error = settings_intf_->SetColorModeWithRenderIntent(
         sdm_display_id_, static_cast<int32_t>(color_mode),
         kColorimetricRenderIntent);
@@ -277,7 +290,7 @@ std::optional<AtomicCommitResult> SdmAtomicStateManager::ExecuteAtomicCommit(
             ErrorToString(display_error).c_str());
       return std::nullopt;
     }
-    last_colorspace_ = *args.colorspace;
+    last_colorspace_ = args.colorspace;
   }
   if (args.color_matrix &&
       (!last_color_matrix_ || *args.color_matrix != *last_color_matrix_)) {
@@ -297,7 +310,7 @@ std::optional<AtomicCommitResult> SdmAtomicStateManager::ExecuteAtomicCommit(
       return std::nullopt;
     }
 
-    shared_ptr<sdm::Fence> out_retire_fence;
+    std::shared_ptr<sdm::Fence> out_retire_fence;
     auto display_error = draw_cycle_intf_->PresentDisplay(sdm_display_id_,
                                                           &out_retire_fence);
     if (display_error != sdm::kErrorNone) {
@@ -330,16 +343,21 @@ bool SdmAtomicStateManager::UpdateClientTarget(
     // No client target to update.
     return true;
   }
-  if (*plan.client_z_order >= plan.plan.size()) {
+  if (*plan.client_z_order < 0 ||
+      static_cast<size_t>(*plan.client_z_order) >= plan.plan.size()) {
     ALOGE("client_z_order is out of bounds: %d >= %d", *plan.client_z_order,
           (int)plan.plan.size());
     return false;
   }
   const LayerData* layer_data = &plan.plan[*plan.client_z_order].layer;
+  if (!layer_data->bi.has_value()) {
+    ALOGE("Client target layer has no BufferInfo");
+    return false;
+  }
   std::shared_ptr<SnapAllocHandle>
       snap_handle = std::static_pointer_cast<SnapAllocHandle>(
           layer_data->bi->fds_shared);
-  shared_ptr<sdm::Fence> acquire_fence;
+  std::shared_ptr<sdm::Fence> acquire_fence;
   if (layer_data->acquire_fence != nullptr) {
     acquire_fence = sdm::Fence::Create(DupFd(layer_data->acquire_fence),
                                        "client target acquire_fence");

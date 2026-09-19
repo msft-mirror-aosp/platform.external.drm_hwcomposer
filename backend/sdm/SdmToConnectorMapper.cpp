@@ -14,14 +14,18 @@
  * limitations under the License.
  */
 
-#define LOG_TAG "drmhwc"
+#define LOG_TAG "drmhwc"  // NOLINT(cppcoreguidelines-macro-usage)
 
 #include "backend/sdm/SdmToConnectorMapper.h"
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdint>
+#include <mutex>
+#include <optional>
 #include <utility>
 
+#include <core/sdm_types.h>
 #include <sdm_display_intf_caps.h>
 
 #include "backend/sdm/sdm_error.h"
@@ -57,7 +61,8 @@ std::optional<uint32_t> SdmToConnectorMapper::Register(SdmDisplayId sdm_id) {
 
   // In Qualcomm SDM, the display hardware ID encodes the DRM connector ID
   // in the lower 12 bits (mask 0xFFF).
-  uint32_t connector_id = static_cast<uint32_t>(disp_hw_id) & 0xFFF;
+  constexpr uint32_t kConnectorIdMask = 0xFFF;
+  uint32_t connector_id = static_cast<uint32_t>(disp_hw_id) & kConnectorIdMask;
   if (connector_id == 0) {
     ALOGE("Invalid connector id 0 for sdm display %" PRIu64 " (hw_id=%d)",
           sdm_id, disp_hw_id);
@@ -165,6 +170,7 @@ std::optional<uint32_t> SdmToConnectorMapper::GetConnectorIdForSdm(
 
 SdmToConnectorMapper::DisplayMapping* SdmToConnectorMapper::FindBySdmIdLocked(
     SdmDisplayId sdm_id) {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
   return const_cast<DisplayMapping*>(
       std::as_const(*this).FindBySdmIdLocked(sdm_id));
 }
@@ -180,6 +186,7 @@ SdmToConnectorMapper::FindBySdmIdLocked(SdmDisplayId sdm_id) const {
 
 SdmToConnectorMapper::DisplayMapping*
 SdmToConnectorMapper::FindByConnectorIdLocked(uint32_t connector_id) {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
   return const_cast<DisplayMapping*>(
       std::as_const(*this).FindByConnectorIdLocked(connector_id));
 }

@@ -16,9 +16,10 @@
 
 #pragma once
 
-#include <map>
+#include <cstdint>
 #include <memory>
-#include <mutex>
+#include <optional>
+#include <string>
 
 #include "backend/Backend.h"
 #include "backend/sdm/SdmHotplugHandler.h"
@@ -40,8 +41,7 @@ class SDMDisplayLifeCycleIntf;
 class SDMSideBandCompositorCbIntf;
 }  // namespace sdm
 
-namespace android {
-namespace drm_hwcomposer {
+namespace android::drm_hwcomposer {
 
 // SdmBackend interfaces with Qualcomm's SDM library to implement a
 // drm_hwcomposer Backend.
@@ -50,7 +50,7 @@ class SdmBackend : public Backend {
   using SdmDisplayId = uint64_t;
 
   explicit SdmBackend(DrmDevice& drm);
-  virtual ~SdmBackend();
+  ~SdmBackend() override;
   std::unique_ptr<DrmDisplayPipeline> CreatePipeline(
       DrmConnector& connector) override;
   std::unique_ptr<BufferInfoGetter> CreateBufferInfoGetter() override;
@@ -68,31 +68,30 @@ class SdmBackend : public Backend {
   static bool Init();
 
  private:
-  std::optional<SdmDisplayId> GetDisplayIdForConnector(
+  static std::optional<SdmDisplayId> GetDisplayIdForConnector(
       const DrmConnector& connector);
-  std::optional<SdmDisplayId> GetBuiltinDisplayId();
+  static std::optional<SdmDisplayId> GetBuiltinDisplayId();
 
   // Interfaces used to interact with SDM. These are created by SDM and returned
   // to the SdmBackend.
-  static std::shared_ptr<sdm::SDMDisplayLifeCycleIntf> life_cycle_intf_;
-  static std::shared_ptr<sdm::SDMDisplayLayerBuilderIntf> layer_builder_intf_;
-  static std::shared_ptr<sdm::SDMDisplayCapsIntf> display_caps_intf_;
-  static std::shared_ptr<sdm::SDMDisplayDrawCycleIntf> draw_cycle_intf_;
-  static std::shared_ptr<sdm::SDMDisplaySettingsIntf> settings_intf_;
-  static std::shared_ptr<sdm::SDMDisplaySideBandIntf> sideband_intf_;
+  static std::shared_ptr<sdm::SDMDisplayLifeCycleIntf> life_cycle_intf;
+  static std::shared_ptr<sdm::SDMDisplayLayerBuilderIntf> layer_builder_intf;
+  static std::shared_ptr<sdm::SDMDisplayCapsIntf> display_caps_intf;
+  static std::shared_ptr<sdm::SDMDisplayDrawCycleIntf> draw_cycle_intf;
+  static std::shared_ptr<sdm::SDMDisplaySettingsIntf> settings_intf;
+  static std::shared_ptr<sdm::SDMDisplaySideBandIntf> sideband_intf;
 
   // Interfaces that need to be implemented by us and passed to SDM. These are
   // created by the SdmBackend and passed to different SDM interfaces as needed.
-  static std::unique_ptr<sdm::HWCBufferAllocator> buffer_allocator_;
-  static std::unique_ptr<sdm::HWCSocketHandler> socket_handler_;
-  static std::unique_ptr<sdm::DebugCallbackIntf> debug_callback_;
-  static std::unique_ptr<sdm::SDMCompositorCbIntf> callback_interface_;
-  static std::unique_ptr<sdm::SDMSideBandCompositorCbIntf> sideband_callbacks_;
+  static std::unique_ptr<sdm::HWCBufferAllocator> buffer_allocator;
+  static std::unique_ptr<sdm::HWCSocketHandler> socket_handler;
+  static std::unique_ptr<sdm::DebugCallbackIntf> debug_callback;
+  static std::unique_ptr<sdm::SDMCompositorCbIntf> callback_interface;
+  static std::unique_ptr<sdm::SDMSideBandCompositorCbIntf> sideband_callbacks;
 
-  static std::unique_ptr<SdmToConnectorMapper> connector_mapper_;
-  static SdmHotplugHandler hotplug_handler_;
-  static bool initialized_;
+  static std::unique_ptr<SdmToConnectorMapper> connector_mapper;
+  static SdmHotplugHandler hotplug_handler;
+  static bool initialized;
 };
 
-}  // namespace drm_hwcomposer
-}  // namespace android
+}  // namespace android::drm_hwcomposer

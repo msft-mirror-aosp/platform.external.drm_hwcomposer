@@ -14,20 +14,37 @@
  * limitations under the License.
  */
 
-#define LOG_TAG "drmhwc"
+#define LOG_TAG "drmhwc"  // NOLINT(cppcoreguidelines-macro-usage)
 
 #include "backend/sdm/SdmCompositionPlanner.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <vector>
+
+#include <system/graphics-base-v1.0.h>
+
+#include <core/buffer_allocator.h>  // IWYU pragma: keep
+#include <core/layer_stack.h>
+#include <core/sdm_types.h>
+#include <sdm_display_intf_drawcycle.h>
+#include <sdm_display_intf_layer_builder.h>
+#include <utils/fence.h>
+
 #include "backend/sdm/SnapAllocHandle.h"
 #include "backend/sdm/sdm_error.h"
+#include "bufferinfo/BufferInfo.h"
+#include "compositor/CompositionPlanner.h"
+#include "compositor/DisplayInfo.h"
+#include "compositor/ICompositorDisplay.h"
 #include "compositor/LayerData.h"
 #include "compositor/LayerToPlaneJoiningPlan.h"
-#include "hwc/HwcDisplay.h"
+#include "hwc/HwcLayer.h"
+#include "utils/fd.h"
 #include "utils/log.h"
-
-#include <sdm_interface_factory_v2.h>
-#include <system/graphics.h>
-#include <cmath>
 
 namespace android::drm_hwcomposer {
 namespace {
@@ -57,6 +74,8 @@ CompositionType SdmCompositionTypeToDrmHwc(int32_t sdm_composition_type) {
       return CompositionType::kSolidColor;
     case static_cast<int32_t>(SDMLayerComposition::kCursor):
       return CompositionType::kCursor;
+    default:
+      break;
   }
   ALOGE("Invalid composition type: %d", sdm_composition_type);
   return CompositionType::kInvalid;
@@ -117,6 +136,7 @@ android_dataspace_t ReconstructDataspace(HwcColorspace colorspace,
       break;
   }
 
+  // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
   return static_cast<android_dataspace_t>(standard | transfer | range_val);
 }
 
@@ -125,11 +145,7 @@ bool ForceClientComposition(const HwcLayer* layer) {
   // in SDM when serviced by device. Force all solid color
   // layers to client.
   // TODO(b/557961309): Re-visit this once SDM is fixed.
-  if (layer->GetSfType() == CompositionType::kSolidColor) {
-    return true;
-  }
-
-  return false;
+  return layer->GetSfType() == CompositionType::kSolidColor;
 }
 
 }  // namespace
@@ -214,6 +230,9 @@ auto SdmCompositionPlanner::ValidateDisplay(const ICompositorDisplay* display)
                                                    &changed_layers.front(),
                                                    &changed_composition_types
                                                         .front());
+  ALOGE_IF(display_error != sdm::kErrorNone,
+           "GetChangedCompositionTypes failed: %s",
+           ErrorToString(display_error).c_str());
 
   if (num_elements > layer_mappings_.size()) {
     ALOGE(
@@ -223,8 +242,8 @@ auto SdmCompositionPlanner::ValidateDisplay(const ICompositorDisplay* display)
   }
   // Iterate through the changed_layers and update the CompositionTypeMap with
   // the corresponding changed_composition_type.
-  for (int i = 0; i < num_elements; i++) {
-    auto hwc_layer = GetHwcLayer(changed_layers[i]);
+  for (uint32_t i = 0; i < num_elements; i++) {
+    const auto* hwc_layer = GetHwcLayer(changed_layers[i]);
     if (hwc_layer == nullptr) {
       ALOGE("couldn't find hwc layer id for sdm layer id: %d",
             static_cast<int>(changed_layers[i]));
@@ -247,6 +266,8 @@ auto SdmCompositionPlanner::ValidateDisplay(const ICompositorDisplay* display)
                                            &num_elements,
                                            &requested_layers.front(),
                                            &requested_masks.front());
+  ALOGE_IF(display_error != sdm::kErrorNone, "GetDisplayRequests failed: %s",
+           ErrorToString(display_error).c_str());
 
   if (num_elements > requested_layers.size()) {
     ALOGE(
@@ -259,15 +280,16 @@ auto SdmCompositionPlanner::ValidateDisplay(const ICompositorDisplay* display)
 
   // For each SDM layer id, find the corresponding HwcLayer.
   std::vector<const HwcLayer*> punch_out_layers;
-  for (int i = 0; i < num_elements; i++) {
-    auto hwc_layer = GetHwcLayer(requested_layers[i]);
+  for (uint32_t i = 0; i < num_elements; i++) {
+    const auto* hwc_layer = GetHwcLayer(requested_layers[i]);
     if (hwc_layer == nullptr) {
       ALOGE("couldn't find hwc layer id for sdm layer id: %d",
             static_cast<int>(requested_layers[i]));
       continue;
     }
     int32_t mask = requested_masks[i];
-    if (mask & static_cast<int32_t>(sdm::SDMLayerRequest::ClearClientTarget)) {
+    if ((mask &
+         static_cast<int32_t>(sdm::SDMLayerRequest::ClearClientTarget)) != 0) {
       punch_out_layers.push_back(hwc_layer);
     }
   }
@@ -331,7 +353,6 @@ void SdmCompositionPlanner::UpdateLayerMapping(
     const ICompositorDisplay& display) {
   const std::vector<const HwcLayer*> hwc_layers = display
                                                       .GetOrderLayersByZPos();
-  bool layers_updated = false;
 
   // Create new SDM layers if needed.
   for (const auto* layer : hwc_layers) {
@@ -345,7 +366,6 @@ void SdmCompositionPlanner::UpdateLayerMapping(
       ALOGE("CreateLayer failed: %s", ErrorToString(display_error).c_str());
       continue;
     }
-    layers_updated = true;
     layer_mappings_[layer] = new_sdm_layer_id;
   }
 
@@ -370,7 +390,6 @@ void SdmCompositionPlanner::UpdateLayerMapping(
       ALOGE_IF(display_error != sdm::kErrorNone, "DestroyLayer failed: %s",
                ErrorToString(display_error).c_str());
       it = layer_mappings_.erase(it);
-      layers_updated = true;
     }
   }
 }
@@ -413,7 +432,7 @@ void SdmCompositionPlanner::UpdateLayerBuffer(SDMLayerId sdm_layer_id,
       snap_handle = std::static_pointer_cast<SnapAllocHandle>(
           layer_data.bi->fds_shared);
 
-  shared_ptr<sdm::Fence> acquire_fence;
+  std::shared_ptr<sdm::Fence> acquire_fence;
   if (layer_data.acquire_fence != nullptr) {
     acquire_fence = sdm::Fence::Create(DupFd(layer_data.acquire_fence),
                                        "acquire_fence");
@@ -477,13 +496,18 @@ void SdmCompositionPlanner::UpdateLayerSolidColor(SDMLayerId sdm_layer_id,
   // Transaction#SetColor in SurfaceControl.java mandates channel value of [0,
   // 1f]. RenderEngine also receives unmodifed channel value. Should really just
   // be float and be left to SDM to convert considering the dataspace.
+  constexpr float kMaxColorChannelValue = 255.0F;
   sdm::SDMColor color{
-      .r = static_cast<uint8_t>(std::round(layer_data.solid_color->r * 255.f)),
-      .g = static_cast<uint8_t>(std::round(layer_data.solid_color->g * 255.f)),
-      .b = static_cast<uint8_t>(std::round(layer_data.solid_color->b * 255.f)),
+      .r = static_cast<uint8_t>(
+          std::round(layer_data.solid_color->r * kMaxColorChannelValue)),
+      .g = static_cast<uint8_t>(
+          std::round(layer_data.solid_color->g * kMaxColorChannelValue)),
+      .b = static_cast<uint8_t>(
+          std::round(layer_data.solid_color->b * kMaxColorChannelValue)),
       // OutputLayer::writeSolidColorStateToHWC() in SF hard codes the alpha
       // channel to 1.0F.
-      .a = static_cast<uint8_t>(std::round(layer_data.solid_color->a * 255.f)),
+      .a = static_cast<uint8_t>(
+          std::round(layer_data.solid_color->a * kMaxColorChannelValue)),
   };
 
   auto display_error = layer_intf_->SetLayerColor(sdm_display_id_, sdm_layer_id,

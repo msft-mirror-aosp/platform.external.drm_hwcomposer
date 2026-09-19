@@ -16,14 +16,17 @@
 
 #pragma once
 
-#include <cinttypes>
+#include <cstdint>
 #include <map>
+#include <memory>
+#include <optional>
+#include <vector>
 
 #include <core/display_interface.h>
 #include <core/sdm_types.h>
 
-#include "backend/BackendDisplayCapabilities.h"
-#include "drm/DrmAtomicCommitSink.h"
+#include "compositor/DisplayInfo.h"
+#include "drm/AtomicStateManager.h"
 #include "drm/DrmMode.h"
 
 namespace sdm {
