@@ -340,4 +340,9 @@ auto Properties::BootAnimationCompleted() -> bool {
   return (property_get_bool("service.bootanim.exit", 0) != 0);
 }
 
+auto Properties::IgnoreDrmMasterFailure() -> bool {
+  return (property_get_bool("vendor.hwc.drm.ignore_drm_master_failure", 0) !=
+          0);
+}
+
 }  // namespace android::drm_hwcomposer

@@ -97,6 +97,8 @@ class Properties {
   static auto BootAnimationEnabled() -> bool;
 
   static auto BootAnimationCompleted() -> bool;
+
+  static auto IgnoreDrmMasterFailure() -> bool;
 };
 
 }  // namespace android::drm_hwcomposer
