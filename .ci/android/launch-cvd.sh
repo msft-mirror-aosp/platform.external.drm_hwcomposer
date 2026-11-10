@@ -149,6 +149,10 @@ VSOCK_BASE=10000 # greater than all the default vsock ports
 VSOCK_CID=$((VSOCK_BASE + (CI_JOB_ID & 0xfff)))
 
 ulimit -S unlimited
+# Cap blank userdata (8 GiB) and sdcard (2 GiB) images instead of 64 GiB each;
+# userdata size also bounds Cuttlefish's composite disk qcow2 overlay.img,
+# shrinking apparent per-VM image size from ~193 GB to ~21 GB. Disable unused
+# Wi-Fi (OpenWRT VM + ap_overlay.img) and modem simulator daemons.
 HOME=/cuttlefish timeout -k 30s 15m launch_cvd \
   -daemon \
   -verbosity=VERBOSE \
@@ -158,13 +162,14 @@ HOME=/cuttlefish timeout -k 30s 15m launch_cvd \
   -report_anonymous_usage_stats=no \
   -gpu_mode="guest_swiftshader" \
   -hwcomposer="drm" \
-  -memory_mb 32768 \
-  -blank_sdcard_image_mb 65536 \
+  -memory_mb 8192 \
+  -blank_sdcard_image_mb 2048 \
   -data_policy=always_create \
-  -blank_data_image_mb 65536 \
+  -blank_data_image_mb 8192 \
   -enable_audio=false \
+  -enable_wifi=false \
+  -enable_modem_simulator=false \
   -enable-sandbox=false \
-  -enable_modem_simulator=true \
   -vsock_guest_cid=$VSOCK_CID \
   -cpus="${FDO_CI_CONCURRENT:-4}" \
   -extra_bootconfig_args="androidboot.vendor.apex.com.android.hardware.graphics.composer=com.android.hardware.graphics.composer.drm_hwcomposer"
