@@ -9,6 +9,7 @@ if [[ -z ${CI_PROJECT_DIR} ]]; then
     CI_PROJECT_DIR="$(dirname "${0}")/../.."
 fi
 
+export NEED_ANDROID_CTS=1
 source "${CI_PROJECT_DIR}/.ci/android/launch-cvd.sh"
 
 fdo_log_section_start_collapsed run_android_cts "run_android_cts"
@@ -25,11 +26,11 @@ fi
 
 set +e
 # shellcheck disable=SC2086 # keep word splitting
-eval /android-tools/android-cts/tools/cts-tradefed run commandAndExit cts-dev \
+eval "${TOOLS_ROOT}/android-cts/tools/cts-tradefed" run commandAndExit cts-dev \
   $INCLUDE_FILTERS $EXCLUDE_FILTERS --log-level-display ASSERT
 
-cp -r "/android-tools/android-cts/results/latest"/* "${RESULTS_DIR}"
-cp -r "/android-tools/android-cts/logs/latest"/* "${RESULTS_DIR}"
+cp -r "${TOOLS_ROOT}/android-cts/results/latest"/* "${RESULTS_DIR}"
+cp -r "${TOOLS_ROOT}/android-cts/logs/latest"/* "${RESULTS_DIR}"
 
 ACTUAL_ASSUMPTION_FAILURES_FILE="${RESULTS_DIR}/cts_results_actual_assumption_failures.txt"
 awk '
